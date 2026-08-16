@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated/downloaded data (regenerable via the scripts)
+data/
+download/
+
+# macOS
+.DS_Store
+
+# Claude Code local session state (not shareable)
+.claude/settings.local.json
