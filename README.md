@@ -77,7 +77,8 @@ Import a 3-Pillar scan CSV (19 columns: `Scan_Date`, `Ticker_Symbol`,
 `Company_Name`, `Sector_Index`, pillar PASS/FAIL statuses, returns, TTM PAT,
 etc. — see `sample_data/sample_scan_2026-08-14.csv` for an example), then:
 
-- **Filter** by date range, sector, status, min pillars met, or ticker/company search.
+- **Filter** by date range, sector, status, min pillars met, entry status,
+  suggestion, or ticker/company search.
 - **Export** the currently filtered view back out as CSV.
 - **Persistence is append-only** — every import adds its rows to a local
   SQLite store (`data/scan_results.db`) without touching existing rows, even
@@ -91,6 +92,35 @@ Note: this UI consumes the output of a "3-Pillar scan" scoring stage
 that doesn't exist as a script in this project yet — `enrich_momentum_metrics.py`
 produces the raw inputs (ATH, returns, EMA, TTM PAT) but not that
 classification layer.
+
+### Scan-over-scan comparison
+
+Each import is compared against every ticker's most recent *prior* import
+(by import timestamp, not calendar date — so re-importing the same data
+twice correctly shows ~0% change, and gaps/duplicate dates don't break it):
+
+- **Entry Status** — `New Entrant` if the ticker has never been imported
+  before, otherwise `Existing`.
+- **Previous Price** / **Gain/Loss %** — the prior import's
+  `Closing_Price_INR` and the percent change since then (`N/A` for new
+  entrants or an unparseable price). These are frozen at import time, not
+  recomputed later, so historical rows stay accurate as new scans arrive.
+- **Suggestion** (`ACCUMULATE` / `HOLD` / `EXIT`) — a rule-based read of the
+  existing 3-Pillar fields only (`Pillars_Met_Count`, the individual
+  Pillar 1/2/3 PASS/FAIL status, `Relative_Alpha_Pct`). **This app has no
+  RSI, volume, or trend-strength data** — the suggestion is not, and cannot
+  be, based on technical indicators beyond what the 3-Pillar scan already
+  computes. Roughly: `ACCUMULATE` when all three pillars still pass and
+  alpha isn't negative; `EXIT` when the ATH-price pillar fails, or
+  outperformance fails alongside negative alpha, or at most one pillar is
+  met; `HOLD` otherwise. See `compute_suggestion()` in `webapp/app.py` for
+  the exact rule.
+- **Stocks that drop out of the screen** (present in the previous import,
+  absent from the new one) aren't deleted — their historical rows remain —
+  but the UI shows a banner listing them right after import.
+- Within a single imported file, duplicate tickers are deduplicated (last
+  row wins) and ticker symbols are case/whitespace-normalized before any
+  comparison.
 
 ## Known limitations
 

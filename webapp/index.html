@@ -126,8 +126,21 @@
   .badge.super { background: rgba(52,211,153,0.18); color: var(--super); }
   .badge.qualifier { background: rgba(251,191,36,0.18); color: var(--qualifier); }
   .badge.neutral { background: rgba(139,147,167,0.15); color: var(--muted); }
+  .badge.info { background: rgba(79,140,255,0.18); color: var(--accent); }
   .neg { color: var(--fail); }
   .pos { color: var(--pass); }
+
+  #exited-banner {
+    display: none;
+    background: #2a2410;
+    border: 1px solid #6b5b2b;
+    color: var(--qualifier);
+    border-radius: 10px;
+    padding: 12px 18px;
+    margin-bottom: 18px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
 
   .table-wrap {
     max-height: 62vh;
@@ -162,6 +175,7 @@
     <code>http://127.0.0.1:5057</code> in your browser.
   </div>
   <div id="import-status"></div>
+  <div id="exited-banner"></div>
 
   <div class="panel">
     <h2>Filters</h2>
@@ -190,6 +204,14 @@
           <option value="2">2+</option>
           <option value="3">3 (all)</option>
         </select>
+      </div>
+      <div class="field">
+        <label>Entry Status</label>
+        <select id="f-entry-status"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Suggestion</label>
+        <select id="f-suggestion"><option value="">All</option></select>
       </div>
       <div class="field">
         <label>Search (ticker / company)</label>
@@ -226,13 +248,22 @@
 
 <script>
 const COLUMNS = [
-  "Scan_Date","Ticker_Symbol","Company_Name","Sector_Index",
-  "Closing_Price_INR","Lifetime_ATH_Price","Dist_From_ATH_Pct",
+  "Ticker_Symbol","Company_Name","Entry_Status","Closing_Price_INR",
+  "Previous_Closing_Price_INR","Gain_Loss_Pct","Suggestion",
+  "Scan_Date","Sector_Index","Lifetime_ATH_Price","Dist_From_ATH_Pct",
   "Pillar_1_ATH_Price_Status","Latest_TTM_PAT_Cr","Pillar_2_ATH_PAT_Status",
   "Stock_52W_Return_Pct","Nifty500_52W_Return_Pct","Sector_52W_Return_Pct",
   "Relative_Alpha_Pct","Pillar_3_Outperformance_Status","Pillars_Met_Count",
   "Status","Suggested_200_EMA_SL","Target_Allocation_Pct","imported_at",
 ];
+
+const COLUMN_LABELS = {
+  imported_at: "Imported At",
+  Previous_Closing_Price_INR: "Previous Price",
+  Closing_Price_INR: "Current Price",
+  Gain_Loss_Pct: "Gain/Loss %",
+  Entry_Status: "Entry Status",
+};
 
 let currentRows = [];
 let sortCol = "Scan_Date";
@@ -248,6 +279,8 @@ function currentFilterParams() {
     sector: qs("f-sector").value,
     status: qs("f-status").value,
     min_pillars: qs("f-min-pillars").value,
+    entry_status: qs("f-entry-status").value,
+    suggestion: qs("f-suggestion").value,
     search: qs("f-search").value,
   };
   for (const [k, v] of Object.entries(map)) if (v) p.set(k, v);
@@ -257,13 +290,18 @@ function currentFilterParams() {
 async function loadMeta() {
   const res = await fetch("/api/meta");
   const meta = await res.json();
-  const sectorSel = qs("f-sector");
-  const statusSel = qs("f-status");
-  const prevSector = sectorSel.value, prevStatus = statusSel.value;
-  sectorSel.innerHTML = '<option value="">All</option>' + meta.sectors.map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`).join("");
-  statusSel.innerHTML = '<option value="">All</option>' + meta.statuses.map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`).join("");
-  sectorSel.value = prevSector;
-  statusSel.value = prevStatus;
+  const selects = {
+    "f-sector": meta.sectors,
+    "f-status": meta.statuses,
+    "f-entry-status": meta.entry_statuses,
+    "f-suggestion": meta.suggestions,
+  };
+  for (const [id, options] of Object.entries(selects)) {
+    const el = qs(id);
+    const prev = el.value;
+    el.innerHTML = '<option value="">All</option>' + options.map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`).join("");
+    el.value = prev;
+  }
   qs("stat-total").textContent = meta.total_records;
   qs("stat-range").textContent = meta.date_min ? `${meta.date_min} → ${meta.date_max}` : "—";
 }
@@ -300,6 +338,22 @@ function renderCell(col, value) {
     const d = new Date(v);
     return isNaN(d) ? escapeHtml(v) : `<span style="color:var(--muted)">${d.toLocaleString()}</span>`;
   }
+  if (col === "Entry_Status") {
+    if (!v) return "";
+    const cls = v === "New Entrant" ? "info" : "neutral";
+    return `<span class="badge ${cls}">${escapeHtml(v)}</span>`;
+  }
+  if (col === "Suggestion") {
+    if (!v) return "";
+    const cls = v === "ACCUMULATE" ? "super" : (v === "EXIT" ? "fail" : "qualifier");
+    return `<span class="badge ${cls}">${escapeHtml(v)}</span>`;
+  }
+  if (col === "Gain_Loss_Pct") {
+    if (!v || v === "N/A") return `<span style="color:var(--muted)">${escapeHtml(v || "—")}</span>`;
+    const n = parseFloat(v);
+    if (!isNaN(n)) return `<span class="${n < 0 ? 'neg' : (n > 0 ? 'pos' : '')}">${escapeHtml(v)}</span>`;
+    return escapeHtml(v);
+  }
   if (["Pillar_1_ATH_Price_Status", "Pillar_2_ATH_PAT_Status", "Pillar_3_Outperformance_Status"].includes(col)) {
     const cls = v.toUpperCase() === "PASS" ? "pass" : (v.toUpperCase() === "FAIL" ? "fail" : "neutral");
     return v ? `<span class="badge ${cls}">${escapeHtml(v)}</span>` : "";
@@ -321,7 +375,7 @@ function renderTable() {
   const head = qs("table-head");
   head.innerHTML = COLUMNS.map(c => {
     const arrow = c === sortCol ? (sortDir === 1 ? "▲" : "▼") : "";
-    const label = c === "imported_at" ? "Imported At" : c.replace(/_/g, " ");
+    const label = COLUMN_LABELS[c] || c.replace(/_/g, " ");
     return `<th data-col="${c}">${label} <span class="arrow">${arrow}</span></th>`;
   }).join("");
   head.querySelectorAll("th").forEach(th => {
@@ -363,7 +417,10 @@ qs("import-btn").addEventListener("click", async () => {
       return;
     }
     status.className = "ok";
-    let msg = `Appended ${data.inserted} row(s) (${data.skipped} skipped). Total records: ${data.total_records}.`;
+    let msg = `Appended ${data.inserted} row(s) — ${data.new_entrants} new entrant(s), ${data.existing} existing (${data.skipped} skipped). Total records: ${data.total_records}.`;
+    if (data.duplicate_tickers_in_file) {
+      msg += ` Deduplicated ${data.duplicate_tickers_in_file} repeated ticker(s) within the file (kept the last row for each).`;
+    }
     if (data.unknown_columns && data.unknown_columns.length) {
       msg += ` Ignored unrecognized columns: ${data.unknown_columns.join(", ")}.`;
     }
@@ -374,6 +431,17 @@ qs("import-btn").addEventListener("click", async () => {
       msg += ` Warning: ${data.unrecognized_dates} row(s) had a Scan Date format I couldn't parse — stored as-is, may sort/filter oddly.`;
     }
     status.textContent = msg;
+
+    const banner = qs("exited-banner");
+    if (data.exited_tickers && data.exited_tickers.length) {
+      banner.style.display = "block";
+      banner.innerHTML = `<strong>${data.exited_tickers.length} stock(s) dropped out of the screen</strong> `
+        + `(present in the previous scan, not in this one): ${data.exited_tickers.map(escapeHtml).join(", ")}. `
+        + `Their historical rows are still preserved below.`;
+    } else {
+      banner.style.display = "none";
+    }
+
     fileInput.value = "";
     await loadMeta();
     await loadData();
@@ -392,6 +460,8 @@ qs("reset-btn").addEventListener("click", () => {
   qs("f-sector").value = "";
   qs("f-status").value = "";
   qs("f-min-pillars").value = "";
+  qs("f-entry-status").value = "";
+  qs("f-suggestion").value = "";
   qs("f-search").value = "";
   loadData();
 });
@@ -404,6 +474,8 @@ qs("export-btn").addEventListener("click", () => {
 qs("clear-btn").addEventListener("click", async () => {
   if (!confirm("Delete ALL persisted scan data? This cannot be undone.")) return;
   await fetch("/api/clear", { method: "POST" });
+  qs("exited-banner").style.display = "none";
+  qs("import-status").textContent = "";
   await loadMeta();
   await loadData();
 });

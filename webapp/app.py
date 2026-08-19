@@ -37,6 +37,24 @@ COLUMNS = [
 REQUIRED_COLUMNS = ("Scan_Date", "Ticker_Symbol")
 SELECT_COLS_SQL = ", ".join(f'"{c}"' for c in COLUMNS)
 
+# Columns the app computes itself at import time by comparing against each
+# ticker's most recent prior import - never read from the uploaded CSV, even
+# if a column with a matching name is present (e.g. a previously exported file).
+DERIVED_COLUMNS = ["Entry_Status", "Previous_Closing_Price_INR", "Gain_Loss_Pct", "Suggestion"]
+
+# Display/export order: identity + entry/gain-loss/suggestion up front, then
+# the rest of the existing scan columns in their original order.
+DISPLAY_COLUMNS = [
+    "Ticker_Symbol", "Company_Name", "Entry_Status", "Closing_Price_INR",
+    "Previous_Closing_Price_INR", "Gain_Loss_Pct", "Suggestion",
+    "Scan_Date", "Sector_Index", "Lifetime_ATH_Price", "Dist_From_ATH_Pct",
+    "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
+    "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
+    "Relative_Alpha_Pct", "Pillar_3_Outperformance_Status", "Pillars_Met_Count",
+    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct",
+]
+DISPLAY_COLS_SQL = ", ".join(f'"{c}"' for c in DISPLAY_COLUMNS)
+
 # Human-friendly header variants (as seen in spreadsheet exports) mapped to
 # the canonical column they mean. Matching also falls back to a punctuation/
 # case-insensitive comparison, so this only needs to cover abbreviations that
@@ -110,6 +128,84 @@ def resolve_column_mapping(fieldnames: list[str]) -> tuple[dict[str, str], list[
     unrecognized = [f for f in fieldnames if f not in mapped_originals]
     return mapping, unrecognized
 
+
+def _parse_number(raw: str) -> float | None:
+    raw = (raw or "").strip().replace(",", "")
+    if not raw or raw.upper() == "N/A":
+        return None
+    try:
+        return float(raw.rstrip("%"))
+    except ValueError:
+        return None
+
+
+def _parse_int(raw: str) -> int | None:
+    raw = (raw or "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def format_gain_loss(current_price: str, previous_price: str) -> str:
+    current = _parse_number(current_price)
+    previous = _parse_number(previous_price)
+    if current is None or previous is None or previous == 0:
+        return "N/A"
+    pct = (current - previous) / previous * 100
+    if pct == 0:
+        return "0%"
+    sign = "+" if pct > 0 else ""
+    return f"{sign}{pct:.1f}%"
+
+
+def compute_suggestion(params: dict) -> str:
+    """Rule-based suggestion from the existing 3-Pillar fields only - this
+    app has no RSI/volume/trend-strength data to draw on.
+    ACCUMULATE - all 3 pillars still PASS and relative alpha isn't negative.
+    EXIT       - the ATH-price pillar fails, or outperformance fails together
+                 with negative alpha, or at most 1 pillar is met overall.
+    HOLD       - everything in between (momentum healthy but not high-conviction)."""
+    pillars_met = _parse_int(params.get("Pillars_Met_Count"))
+    p1 = (params.get("Pillar_1_ATH_Price_Status") or "").strip().upper()
+    p3 = (params.get("Pillar_3_Outperformance_Status") or "").strip().upper()
+    alpha = _parse_number(params.get("Relative_Alpha_Pct"))
+
+    if pillars_met is not None and pillars_met >= 3 and p1 == "PASS" and p3 == "PASS" and (alpha is None or alpha >= 0):
+        return "ACCUMULATE"
+    if p1 == "FAIL" or (p3 == "FAIL" and alpha is not None and alpha < 0) or (pillars_met is not None and pillars_met <= 1):
+        return "EXIT"
+    return "HOLD"
+
+
+def get_previous_row(conn: sqlite3.Connection, ticker: str, before_ts: str) -> sqlite3.Row | None:
+    """Most recent row for this ticker from strictly before the current
+    import's timestamp - i.e. the last scan we had for it before now."""
+    return conn.execute(
+        'SELECT "Closing_Price_INR" FROM scan_results '
+        'WHERE "Ticker_Symbol" = ? AND imported_at < ? '
+        'ORDER BY imported_at DESC LIMIT 1',
+        (ticker, before_ts),
+    ).fetchone()
+
+
+def get_previous_batch_tickers(conn: sqlite3.Connection, before_ts: str) -> set[str]:
+    """Tickers from the single most recent import that happened before now -
+    used to detect stocks that dropped out of the screen entirely."""
+    row = conn.execute(
+        'SELECT imported_at FROM scan_results WHERE imported_at < ? '
+        'ORDER BY imported_at DESC LIMIT 1',
+        (before_ts,),
+    ).fetchone()
+    if not row:
+        return set()
+    tickers = conn.execute(
+        'SELECT DISTINCT "Ticker_Symbol" FROM scan_results WHERE imported_at = ?',
+        (row[0],),
+    ).fetchall()
+    return {t[0] for t in tickers}
+
+
 app = Flask(__name__)
 
 
@@ -157,6 +253,16 @@ def init_db() -> None:
                 imported_at TEXT
             )
         """)
+
+    # Backfill Entry_Status/Previous_Closing_Price_INR/Gain_Loss_Pct/Suggestion
+    # for DBs created before this feature existed. Older rows are left blank
+    # (NULL) since they predate the comparison logic - only new imports from
+    # here on get these fields populated.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_results)").fetchall()}
+    for col in DERIVED_COLUMNS:
+        if col not in existing_cols:
+            conn.execute(f'ALTER TABLE scan_results ADD COLUMN "{col}" TEXT')
+
     conn.commit()
     conn.close()
 
@@ -185,21 +291,34 @@ def api_import():
         return jsonify({"error": f"CSV missing required column(s): {missing}"}), 400
     unmapped_expected = [c for c in COLUMNS if c not in column_map]
 
-    rows = list(reader)
-    if not rows:
+    raw_rows = list(reader)
+    if not raw_rows:
         return jsonify({"error": "CSV has no data rows"}), 400
+
+    # Normalize + deduplicate by ticker within this file - last occurrence wins.
+    deduped: dict[str, dict] = {}
+    duplicate_tickers = 0
+    for row in raw_rows:
+        ticker_norm = (row.get(column_map["Ticker_Symbol"]) or "").strip().upper()
+        if not ticker_norm:
+            continue
+        if ticker_norm in deduped:
+            duplicate_tickers += 1
+        deduped[ticker_norm] = row
 
     conn = get_db()
     inserted = skipped = 0
+    new_entrant_count = existing_count = 0
     unparsed_dates = 0
     now = datetime.now(timezone.utc).isoformat()
-    placeholders = ", ".join(f'"{c}"' for c in COLUMNS)
-    values_ph = ", ".join(f":{c}" for c in COLUMNS)
+    insert_columns = COLUMNS + DERIVED_COLUMNS
+    placeholders = ", ".join(f'"{c}"' for c in insert_columns)
+    values_ph = ", ".join(f":{c}" for c in insert_columns)
+    imported_tickers = set()
 
-    for row in rows:
+    for ticker_norm, row in deduped.items():
         scan_date_raw = (row.get(column_map["Scan_Date"]) or "").strip()
-        ticker = (row.get(column_map["Ticker_Symbol"]) or "").strip()
-        if not scan_date_raw or not ticker:
+        if not scan_date_raw:
             skipped += 1
             continue
         scan_date, recognized = normalize_scan_date(scan_date_raw)
@@ -211,8 +330,21 @@ def api_import():
             for c in COLUMNS
         }
         params["Scan_Date"] = scan_date
-        params["Ticker_Symbol"] = ticker
+        params["Ticker_Symbol"] = ticker_norm
         params["imported_at"] = now
+
+        prev = get_previous_row(conn, ticker_norm, now)
+        if prev is None:
+            params["Entry_Status"] = "New Entrant"
+            params["Previous_Closing_Price_INR"] = ""
+            params["Gain_Loss_Pct"] = "N/A"
+            new_entrant_count += 1
+        else:
+            params["Entry_Status"] = "Existing"
+            params["Previous_Closing_Price_INR"] = prev["Closing_Price_INR"] or ""
+            params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], prev["Closing_Price_INR"])
+            existing_count += 1
+        params["Suggestion"] = compute_suggestion(params)
 
         # Always append - never overwrite an existing row, even if this
         # Scan_Date/Ticker_Symbol combo was already imported before.
@@ -221,6 +353,9 @@ def api_import():
             VALUES ({values_ph}, :imported_at)
         """, params)
         inserted += 1
+        imported_tickers.add(ticker_norm)
+
+    exited_tickers = sorted(get_previous_batch_tickers(conn, now) - imported_tickers)
 
     conn.commit()
     total = conn.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0]
@@ -229,6 +364,10 @@ def api_import():
     return jsonify({
         "inserted": inserted,
         "skipped": skipped,
+        "duplicate_tickers_in_file": duplicate_tickers,
+        "new_entrants": new_entrant_count,
+        "existing": existing_count,
+        "exited_tickers": exited_tickers,
         "unrecognized_dates": unparsed_dates,
         "unknown_columns": unknown,
         "unmapped_expected_columns": unmapped_expected,
@@ -265,6 +404,16 @@ def _build_filters(args):
         clauses.append('CAST("Pillars_Met_Count" AS INTEGER) >= ?')
         params.append(int(min_pillars))
 
+    entry_status = args.get("entry_status", "").strip()
+    if entry_status:
+        clauses.append('"Entry_Status" = ?')
+        params.append(entry_status)
+
+    suggestion = args.get("suggestion", "").strip()
+    if suggestion:
+        clauses.append('"Suggestion" = ?')
+        params.append(suggestion)
+
     search = args.get("search", "").strip()
     if search:
         clauses.append('("Ticker_Symbol" LIKE ? OR "Company_Name" LIKE ?)')
@@ -280,7 +429,7 @@ def api_data():
     conn = get_db()
     where, params = _build_filters(request.args)
     rows = conn.execute(
-        f'SELECT id, {SELECT_COLS_SQL}, imported_at FROM scan_results {where} '
+        f'SELECT id, {DISPLAY_COLS_SQL}, imported_at FROM scan_results {where} '
         'ORDER BY "Scan_Date" DESC, "Ticker_Symbol" ASC, imported_at DESC',
         params,
     ).fetchall()
@@ -297,12 +446,20 @@ def api_meta():
     statuses = [r[0] for r in conn.execute(
         'SELECT DISTINCT "Status" FROM scan_results WHERE "Status" != "" ORDER BY 1'
     ).fetchall()]
+    entry_statuses = [r[0] for r in conn.execute(
+        'SELECT DISTINCT "Entry_Status" FROM scan_results WHERE "Entry_Status" IS NOT NULL AND "Entry_Status" != "" ORDER BY 1'
+    ).fetchall()]
+    suggestions = [r[0] for r in conn.execute(
+        'SELECT DISTINCT "Suggestion" FROM scan_results WHERE "Suggestion" IS NOT NULL AND "Suggestion" != "" ORDER BY 1'
+    ).fetchall()]
     bounds = conn.execute('SELECT MIN("Scan_Date"), MAX("Scan_Date") FROM scan_results').fetchone()
     total = conn.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0]
     conn.close()
     return jsonify({
         "sectors": sectors,
         "statuses": statuses,
+        "entry_statuses": entry_statuses,
+        "suggestions": suggestions,
         "date_min": bounds[0],
         "date_max": bounds[1],
         "total_records": total,
@@ -314,14 +471,14 @@ def api_export():
     conn = get_db()
     where, params = _build_filters(request.args)
     rows = conn.execute(
-        f'SELECT {SELECT_COLS_SQL} FROM scan_results {where} '
+        f'SELECT {DISPLAY_COLS_SQL} FROM scan_results {where} '
         'ORDER BY "Scan_Date" DESC, "Ticker_Symbol" ASC',
         params,
     ).fetchall()
     conn.close()
 
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=COLUMNS)
+    writer = csv.DictWriter(buf, fieldnames=DISPLAY_COLUMNS)
     writer.writeheader()
     for r in rows:
         writer.writerow(dict(r))
