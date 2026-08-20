@@ -60,23 +60,23 @@ DISPLAY_COLS_SQL = ", ".join(f'"{c}"' for c in DISPLAY_COLUMNS)
 # case-insensitive comparison, so this only needs to cover abbreviations that
 # fallback wouldn't catch on its own (e.g. "Ticker" vs "Ticker_Symbol").
 HEADER_ALIASES = {
-    "Scan_Date": ["Scan Date"],
-    "Ticker_Symbol": ["Ticker"],
+    "Scan_Date": ["Scan Date", "market_data_date", "Market Data Date"],
+    "Ticker_Symbol": ["Ticker", "symbol", "Symbol"],
     "Company_Name": ["Company"],
-    "Sector_Index": ["Sector"],
-    "Closing_Price_INR": ["Close (INR)", "Close", "Closing Price"],
+    "Sector_Index": ["Sector", "industry", "Industry"],
+    "Closing_Price_INR": ["Close (INR)", "Close", "Closing Price", "close_price", "Close Price"],
     "Lifetime_ATH_Price": ["ATH (INR)", "ATH Price (INR)", "Lifetime ATH"],
     "Dist_From_ATH_Pct": ["Dist. from ATH", "Dist from ATH", "Dist. from ATH (%)"],
     "Pillar_1_ATH_Price_Status": ["ATH Price", "Pillar 1", "Pillar 1 Status"],
-    "Latest_TTM_PAT_Cr": ["TTM PAT (Cr)", "TTM PAT", "Latest TTM PAT"],
+    "Latest_TTM_PAT_Cr": ["TTM PAT (Cr)", "TTM PAT", "Latest TTM PAT", "ttm_pat_ath_cr", "TTM PAT ATH (Cr)"],
     "Pillar_2_ATH_PAT_Status": ["ATH PAT", "Pillar 2", "Pillar 2 Status"],
-    "Stock_52W_Return_Pct": ["52W Stock (%)", "52W Stock", "Stock 52W Return"],
-    "Nifty500_52W_Return_Pct": ["Nifty 500 52W", "Nifty500 52W", "Nifty 500 52W (%)"],
-    "Sector_52W_Return_Pct": ["Sector 52W", "Sector 52W (%)"],
+    "Stock_52W_Return_Pct": ["52W Stock (%)", "52W Stock", "Stock 52W Return", "return_52w_pct", "Return 52W"],
+    "Nifty500_52W_Return_Pct": ["Nifty 500 52W", "Nifty500 52W", "Nifty 500 52W (%)", "nifty500_return_52w_pct"],
+    "Sector_52W_Return_Pct": ["Sector 52W", "Sector 52W (%)", "sector_return_52w_pct"],
     "Relative_Alpha_Pct": ["Relative Alpha", "Relative Alpha (%)"],
     "Pillar_3_Outperformance_Status": ["Outperformance", "Pillar 3", "Pillar 3 Status"],
     "Pillars_Met_Count": ["Pillars", "Pillars Met"],
-    "Suggested_200_EMA_SL": ["200 EMA SL (INR)", "200 EMA SL", "Suggested 200 EMA SL"],
+    "Suggested_200_EMA_SL": ["200 EMA SL (INR)", "200 EMA SL", "Suggested 200 EMA SL", "ema_200", "EMA 200"],
     "Target_Allocation_Pct": ["Allocation (%)", "Allocation", "Target Allocation"],
 }
 
@@ -127,6 +127,53 @@ def resolve_column_mapping(fieldnames: list[str]) -> tuple[dict[str, str], list[
     mapped_originals = set(mapping.values())
     unrecognized = [f for f in fieldnames if f not in mapped_originals]
     return mapping, unrecognized
+
+
+# Some source files (e.g. exports that already diff two scans themselves)
+# encode a changed cell as "previous -> current", leaving unchanged cells as
+# a single plain value. We only ever want the current value for storage.
+_ARROW_RE = re.compile(r"\s*->\s*")
+
+
+def _resolve_current_value(raw: str) -> str:
+    raw = (raw or "").strip()
+    parts = _ARROW_RE.split(raw)
+    return parts[-1].strip() if len(parts) > 1 else raw
+
+
+def _split_arrow_value(raw: str) -> tuple[str, str] | None:
+    """Returns (previous, current) if this cell encodes a change, else None."""
+    raw = (raw or "").strip()
+    parts = _ARROW_RE.split(raw)
+    return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else None
+
+
+# Some source files also pre-compute their own Entry Status / Gain-Loss
+# columns (having already diffed against their own prior scan). When present
+# we trust them over our own DB-based comparison, since they're authoritative
+# for that specific file; our own comparison remains the fallback otherwise.
+ENTRY_STATUS_OVERRIDE_ALIASES = ["Entrant Type", "Entry Status", "Entrant_Type"]
+GAIN_LOSS_OVERRIDE_ALIASES = ["% Gain/Loss", "Gain/Loss %", "Gain_Loss_Pct", "Gain Loss %"]
+ENTRY_STATUS_VALUE_MAP = {
+    "EXISTING": "Existing",
+    "NEW_ENTRANT": "New Entrant",
+    "NEWENTRANT": "New Entrant",
+    "NEW ENTRANT": "New Entrant",
+}
+
+
+def _find_column(fieldnames: list[str], aliases: list[str]) -> str | None:
+    normalized_to_original = {_normalize_header(f): f for f in fieldnames}
+    for alias in aliases:
+        norm = _normalize_header(alias)
+        if norm in normalized_to_original:
+            return normalized_to_original[norm]
+    return None
+
+
+def _normalize_entry_status(raw: str) -> str:
+    raw = (raw or "").strip()
+    return ENTRY_STATUS_VALUE_MAP.get(raw.upper().replace("-", "_"), raw)
 
 
 def _parse_number(raw: str) -> float | None:
@@ -291,6 +338,13 @@ def api_import():
         return jsonify({"error": f"CSV missing required column(s): {missing}"}), 400
     unmapped_expected = [c for c in COLUMNS if c not in column_map]
 
+    # Some source files already pre-compute their own entry-status / gain-loss
+    # (having diffed two scans themselves) - prefer those over our own DB-based
+    # comparison when present. They're "recognized", not unknown/ignored.
+    entrant_status_col = _find_column(fieldnames, ENTRY_STATUS_OVERRIDE_ALIASES)
+    gain_loss_col = _find_column(fieldnames, GAIN_LOSS_OVERRIDE_ALIASES)
+    unknown = [c for c in unknown if c not in (entrant_status_col, gain_loss_col)]
+
     raw_rows = list(reader)
     if not raw_rows:
         return jsonify({"error": "CSV has no data rows"}), 400
@@ -317,7 +371,7 @@ def api_import():
     imported_tickers = set()
 
     for ticker_norm, row in deduped.items():
-        scan_date_raw = (row.get(column_map["Scan_Date"]) or "").strip()
+        scan_date_raw = _resolve_current_value(row.get(column_map["Scan_Date"]) or "")
         if not scan_date_raw:
             skipped += 1
             continue
@@ -325,25 +379,45 @@ def api_import():
         if not recognized:
             unparsed_dates += 1
 
+        # A cell may encode a scan-over-scan change as "previous -> current" -
+        # capture the raw Closing_Price_INR before stripping arrows so its
+        # embedded previous price can seed Previous_Closing_Price_INR below.
+        raw_close = (row.get(column_map.get("Closing_Price_INR", "")) or "").strip()
+        arrow_split = _split_arrow_value(raw_close)
+
         params = {
-            c: (row.get(column_map[c]) or "").strip() if c in column_map else ""
+            c: _resolve_current_value(row.get(column_map[c]) or "") if c in column_map else ""
             for c in COLUMNS
         }
         params["Scan_Date"] = scan_date
         params["Ticker_Symbol"] = ticker_norm
         params["imported_at"] = now
 
-        prev = get_previous_row(conn, ticker_norm, now)
-        if prev is None:
-            params["Entry_Status"] = "New Entrant"
+        prev_db_row = get_previous_row(conn, ticker_norm, now)
+
+        if entrant_status_col:
+            params["Entry_Status"] = _normalize_entry_status(row.get(entrant_status_col) or "")
+        else:
+            has_history = arrow_split is not None or prev_db_row is not None
+            params["Entry_Status"] = "Existing" if has_history else "New Entrant"
+
+        if arrow_split is not None:
+            prev_price_str, cur_price_str = arrow_split
+            params["Previous_Closing_Price_INR"] = prev_price_str
+            override_gain_loss = (row.get(gain_loss_col) or "").strip() if gain_loss_col else ""
+            params["Gain_Loss_Pct"] = override_gain_loss or format_gain_loss(cur_price_str, prev_price_str)
+        elif prev_db_row is not None:
+            params["Previous_Closing_Price_INR"] = prev_db_row["Closing_Price_INR"] or ""
+            params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], prev_db_row["Closing_Price_INR"])
+        else:
             params["Previous_Closing_Price_INR"] = ""
             params["Gain_Loss_Pct"] = "N/A"
+
+        if params["Entry_Status"] == "New Entrant":
             new_entrant_count += 1
         else:
-            params["Entry_Status"] = "Existing"
-            params["Previous_Closing_Price_INR"] = prev["Closing_Price_INR"] or ""
-            params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], prev["Closing_Price_INR"])
             existing_count += 1
+
         params["Suggestion"] = compute_suggestion(params)
 
         # Always append - never overwrite an existing row, even if this

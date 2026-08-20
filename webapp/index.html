@@ -360,7 +360,10 @@ function renderCell(col, value) {
   }
   if (col === "Status") {
     const u = v.toUpperCase();
-    const cls = u.includes("SUPER") ? "super" : (u.includes("QUALIF") ? "qualifier" : "neutral");
+    const cls = u.includes("SUPER") ? "super"
+      : u.includes("EXIT") ? "fail"
+      : (u.includes("QUALIF") || u === "PERFORMER") ? "qualifier"
+      : "neutral";
     return v ? `<span class="badge ${cls}">${escapeHtml(v)}</span>` : "";
   }
   if (col.endsWith("_Pct") || col.endsWith("Pct")) {

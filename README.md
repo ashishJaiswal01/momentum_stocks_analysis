@@ -122,6 +122,24 @@ twice correctly shows ~0% change, and gaps/duplicate dates don't break it):
   row wins) and ticker symbols are case/whitespace-normalized before any
   comparison.
 
+#### Files that already carry their own comparison
+
+Some source files pre-diff two scans themselves rather than leaving it to
+this app. Two conventions are recognized automatically:
+
+- **`"previous -> current"` cells** — any cell can encode a change this way
+  (e.g. `"3672.80 -> 3706.40"`, `"PASS -> FAIL"`, `"3 -> 2"`); only the
+  right-hand (current) value is stored for that field, except
+  `Closing_Price_INR`, where the left-hand value seeds `Previous_Closing_Price_INR`
+  directly instead of looking it up from prior imports. A cell with no arrow
+  is treated as unchanged and used as-is.
+- **`Entrant Type`** (`EXISTING`/`NEW_ENTRANT`) and **`% Gain/Loss`** columns,
+  if present, are trusted directly for `Entry_Status`/`Gain_Loss_Pct` instead
+  of being computed from this app's own import history.
+
+`Suggestion` is always computed independently by this app's own rule (never
+read from the source file), regardless of which convention a file uses.
+
 ## Known limitations
 
 - **Sector-index 52-week return** is blank for ~30% of stocks — Yahoo Finance
