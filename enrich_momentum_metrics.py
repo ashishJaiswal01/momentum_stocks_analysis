@@ -89,6 +89,7 @@ class PriceMetrics:
 @dataclass
 class TtmPatResult:
     ath: float | None = None
+    latest: float | None = None  # most recent rolling 4-quarter TTM PAT (vs. ath = historical max)
     quarters_available: int = 0
     source_view: str = ""
     error: str = ""
@@ -324,9 +325,12 @@ def _extract_net_profit_ttm(html: str, view: str) -> TtmPatResult | None:
         if len(values) < 4:
             continue
 
+        # Quarter columns run oldest -> newest, so the last rolling window is
+        # the most recent (current) TTM figure.
         rolling_sums = [sum(values[i:i + 4]) for i in range(len(values) - 3)]
         return TtmPatResult(
             ath=max(rolling_sums),
+            latest=rolling_sums[-1],
             quarters_available=len(values),
             source_view=view,
         )
@@ -465,8 +469,8 @@ def run(args: argparse.Namespace) -> int:
         "symbol", "company_name", "industry", "market_data_date", "close_price",
         "lifetime_ath_price", "return_52w_pct", "ema_200",
         "nifty500_return_52w_pct", "sector_index_ticker", "sector_return_52w_pct",
-        "ttm_pat_ath_cr", "ttm_pat_ath_quarters_available", "ttm_pat_source_view",
-        "notes",
+        "ttm_pat_ath_cr", "ttm_pat_latest_cr", "ttm_pat_ath_quarters_available",
+        "ttm_pat_source_view", "notes",
     ]
     json_rows = []
     with open(csv_path, "w", newline="") as f:
@@ -487,6 +491,7 @@ def run(args: argparse.Namespace) -> int:
                 "sector_index_ticker": rec.sector_ticker or None,
                 "sector_return_52w_pct": round(rec.sector_return_52w * 100, 4) if rec.sector_return_52w is not None else None,
                 "ttm_pat_ath_cr": rec.ttm_pat.ath,
+                "ttm_pat_latest_cr": rec.ttm_pat.latest,
                 "ttm_pat_ath_quarters_available": rec.ttm_pat.quarters_available or None,
                 "ttm_pat_source_view": rec.ttm_pat.source_view or None,
                 "notes": notes,

@@ -13,8 +13,10 @@ Run with:
 
 import csv
 import io
+import json
 import re
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +26,9 @@ APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
 DB_PATH = PROJECT_DIR / "data" / "scan_results.db"
 
+sys.path.insert(0, str(PROJECT_DIR))
+import run_3pillar_scan  # noqa: E402 - needs PROJECT_DIR on sys.path first
+
 # The 3-Pillar scan result schema. Stored as TEXT throughout so values like
 # "-0.75%" and "N/A" round-trip losslessly between import and export.
 COLUMNS = [
@@ -32,7 +37,7 @@ COLUMNS = [
     "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
     "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
     "Relative_Alpha_Pct", "Pillar_3_Outperformance_Status", "Pillars_Met_Count",
-    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct",
+    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "AI_Commentary",
 ]
 REQUIRED_COLUMNS = ("Scan_Date", "Ticker_Symbol")
 SELECT_COLS_SQL = ", ".join(f'"{c}"' for c in COLUMNS)
@@ -51,7 +56,7 @@ DISPLAY_COLUMNS = [
     "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
     "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
     "Relative_Alpha_Pct", "Pillar_3_Outperformance_Status", "Pillars_Met_Count",
-    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct",
+    "Status", "AI_Commentary", "Suggested_200_EMA_SL", "Target_Allocation_Pct",
 ]
 DISPLAY_COLS_SQL = ", ".join(f'"{c}"' for c in DISPLAY_COLUMNS)
 
@@ -301,12 +306,12 @@ def init_db() -> None:
             )
         """)
 
-    # Backfill Entry_Status/Previous_Closing_Price_INR/Gain_Loss_Pct/Suggestion
-    # for DBs created before this feature existed. Older rows are left blank
-    # (NULL) since they predate the comparison logic - only new imports from
-    # here on get these fields populated.
+    # Backfill any column added to COLUMNS/DERIVED_COLUMNS after this DB was
+    # first created (e.g. Entry_Status, or AI_Commentary). Older rows are left
+    # blank (NULL) for such columns since they predate the feature - only new
+    # imports from here on get them populated.
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_results)").fetchall()}
-    for col in DERIVED_COLUMNS:
+    for col in COLUMNS + DERIVED_COLUMNS:
         if col not in existing_cols:
             conn.execute(f'ALTER TABLE scan_results ADD COLUMN "{col}" TEXT')
 
@@ -319,23 +324,19 @@ def index():
     return send_from_directory(APP_DIR, "index.html")
 
 
-@app.route("/api/import", methods=["POST"])
-def api_import():
-    file = request.files.get("file")
-    if not file or not file.filename:
-        return jsonify({"error": "no file provided"}), 400
-
+def import_csv_text(text: str) -> dict:
+    """Core import logic, shared by the file-upload route and the "run scan"
+    trigger. Raises ValueError with a user-facing message on bad input."""
     try:
-        text = file.read().decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
-    except (UnicodeDecodeError, csv.Error) as e:
-        return jsonify({"error": f"could not parse CSV: {e}"}), 400
+    except csv.Error as e:
+        raise ValueError(f"could not parse CSV: {e}")
 
     fieldnames = reader.fieldnames or []
     column_map, unknown = resolve_column_mapping(fieldnames)
     missing = [c for c in REQUIRED_COLUMNS if c not in column_map]
     if missing:
-        return jsonify({"error": f"CSV missing required column(s): {missing}"}), 400
+        raise ValueError(f"CSV missing required column(s): {missing}")
     unmapped_expected = [c for c in COLUMNS if c not in column_map]
 
     # Some source files already pre-compute their own entry-status / gain-loss
@@ -347,7 +348,7 @@ def api_import():
 
     raw_rows = list(reader)
     if not raw_rows:
-        return jsonify({"error": "CSV has no data rows"}), 400
+        raise ValueError("CSV has no data rows")
 
     # Normalize + deduplicate by ticker within this file - last occurrence wins.
     deduped: dict[str, dict] = {}
@@ -435,7 +436,7 @@ def api_import():
     total = conn.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0]
     conn.close()
 
-    return jsonify({
+    return {
         "inserted": inserted,
         "skipped": skipped,
         "duplicate_tickers_in_file": duplicate_tickers,
@@ -446,7 +447,64 @@ def api_import():
         "unknown_columns": unknown,
         "unmapped_expected_columns": unmapped_expected,
         "total_records": total,
-    })
+    }
+
+
+@app.route("/api/import", methods=["POST"])
+def api_import():
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return jsonify({"error": "no file provided"}), 400
+    try:
+        text = file.read().decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        return jsonify({"error": f"could not parse CSV: {e}"}), 400
+    try:
+        result = import_csv_text(text)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
+@app.route("/api/bhavcopy-dates")
+def api_bhavcopy_dates():
+    bhavcopy_dir = PROJECT_DIR / "data" / "bhavcopy"
+    if not bhavcopy_dir.exists():
+        return jsonify({"dates": [], "latest": None})
+
+    dates = sorted(
+        (p.name for p in bhavcopy_dir.iterdir()
+         if p.is_dir() and (p / "enriched" / "momentum_metrics.csv").exists()),
+        reverse=True,
+    )
+    latest_path = bhavcopy_dir / "latest.json"
+    latest = None
+    if latest_path.exists():
+        latest = json.loads(latest_path.read_text()).get("market_data_date")
+    return jsonify({"dates": dates, "latest": latest})
+
+
+@app.route("/api/run-scan", methods=["POST"])
+def api_run_scan():
+    payload = request.get_json(silent=True) or {}
+    requested_date = (payload.get("date") or "").strip() or None
+
+    data_dir = PROJECT_DIR / "data"
+    try:
+        market_date = run_3pillar_scan.resolve_market_date(data_dir, requested_date)
+        scan_meta = run_3pillar_scan.run_scan(data_dir, market_date)
+    except run_3pillar_scan.ScanInputError as e:
+        return jsonify({"error": str(e)}), 400
+
+    csv_path = Path(scan_meta["csv_path"])
+    text = csv_path.read_text()
+    try:
+        result = import_csv_text(text)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    result["scan_meta"] = scan_meta
+    return jsonify(result)
 
 
 def _build_filters(args):

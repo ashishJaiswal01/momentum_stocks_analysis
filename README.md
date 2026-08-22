@@ -12,9 +12,14 @@ Requires Python 3 and a local virtualenv:
 ```bash
 cd "/Users/ashish.jaiswal/Projects/Datadownload&Aggregate"
 python3 -m venv .venv
-./.venv/bin/pip install yfinance pandas lxml requests flask
+./.venv/bin/pip install yfinance pandas lxml requests flask openai python-dotenv
 chmod +x run_pipeline.sh run_webapp.sh
+cp .env.example .env   # then edit .env and add your own OPENAI_API_KEY
 ```
+
+`.env` is gitignored — your API key never gets committed. Everything works
+without it except the AI commentary column (see step 2 below), which is
+simply left blank if no key is configured.
 
 ## 1. Download + enrich pipeline
 
@@ -62,7 +67,47 @@ higher concurrency, so raise `--workers` / lower `--request-delay` in
 `enrich_momentum_metrics.py` at your own risk. Pass `--skip-ttm-pat` to that
 script directly for a fast, Yahoo-only run.
 
-## 2. Scan results data browser (web UI)
+## 2. 3-Pillar screening engine
+
+```bash
+cd "/Users/ashish.jaiswal/Projects/Datadownload&Aggregate"
+./.venv/bin/python3 run_3pillar_scan.py            # scans the latest bhavcopy date
+./.venv/bin/python3 run_3pillar_scan.py --date 2026-08-14
+```
+
+Classifies every Nifty 500 stock in a market date's `enrich_momentum_metrics.py`
+output against three non-negotiable criteria:
+
+- **Pillar 1 (ATH Price)** — within 2% of its lifetime-high price
+  (`Dist_From_ATH_Pct >= -2.00%`).
+- **Pillar 2 (ATH PAT)** — its latest TTM net profit equals its own
+  historical-max TTM PAT (i.e. profits are currently at a record).
+- **Pillar 3 (Outperformance)** — trailing 52-week return beats both the
+  Nifty 500 benchmark and (where a sector index is available) its sector.
+
+3/3 pillars → `SUPER_PERFORMER`, 2/3 → `PERFORMER`. A stock meeting ≤1 pillar
+is dropped from the output entirely *unless* it was already being tracked in
+`data/scan_results.db` (the web app's store), in which case it's kept one
+more scan with `Status=EXIT_SELL` so the exit is visible instead of the stock
+just silently disappearing. Also computes `Relative_Alpha_Pct` (stock return
+minus benchmark return) and `Target_Allocation_Pct` (`1.2% ÷ downside risk to
+the 200 EMA`, i.e. smaller stop-loss distance → larger suggested position).
+
+Output: `data/bhavcopy/<date>/enriched/3pillar_scan.csv` (flat, no arrow
+notation — `Entry_Status`/`Gain_Loss_Pct`/`Suggestion` are left for the web
+app to compute at import time from its own history, same as any other
+imported file) and `3pillar_scan_meta.json` (counts by status).
+
+Each stock that makes the final cut also gets an `AI_Commentary` column: a
+1-2 sentence, factual, plain-English rationale generated via the OpenAI API
+(model configurable via `OPENAI_MODEL` in `.env`, default `gpt-4o-mini`) from
+the already-computed pillar results. **This is purely narration, not
+analysis** — the prompt explicitly forbids introducing new numbers or
+recommendations, so it can never override or contradict the deterministic
+math above. Pass `--skip-ai-commentary` for a faster run, or just leave
+`OPENAI_API_KEY` unset in `.env` — either way the column is simply blank.
+
+## 3. Scan results data browser (web UI)
 
 ```bash
 cd "/Users/ashish.jaiswal/Projects/Datadownload&Aggregate"
@@ -73,12 +118,22 @@ Then open **http://127.0.0.1:5057** in your browser (opening `webapp/index.html`
 directly as a `file://` path will not work — there's no backend behind it that
 way, and the page will show a warning if you try).
 
-Import a 3-Pillar scan CSV (19 columns: `Scan_Date`, `Ticker_Symbol`,
-`Company_Name`, `Sector_Index`, pillar PASS/FAIL statuses, returns, TTM PAT,
-etc. — see `sample_data/sample_scan_2026-08-14.csv` for an example), then:
+**Run 3-Pillar Scan** (top of the page) lets you pick any date from
+`data/bhavcopy/` (dropdown, populated from folders that have enrichment
+output; latest pre-selected) and run the screening engine above directly from
+the UI — its output is appended into the store the same way a manual CSV
+import would be, no separate upload step needed.
+
+Or import a 3-Pillar scan CSV manually (19 columns: `Scan_Date`,
+`Ticker_Symbol`, `Company_Name`, `Sector_Index`, pillar PASS/FAIL statuses,
+returns, TTM PAT, etc. — see `sample_data/sample_scan_2026-08-14.csv` for an
+example), then:
 
 - **Filter** by date range, sector, status, min pillars met, entry status,
   suggestion, or ticker/company search.
+- **Reorder columns** by dragging a header left or right; the order is saved
+  in the browser (`localStorage`) and persists across reloads. "Reset Columns"
+  restores the default order.
 - **Export** the currently filtered view back out as CSV.
 - **Persistence is append-only** — every import adds its rows to a local
   SQLite store (`data/scan_results.db`) without touching existing rows, even
@@ -86,12 +141,6 @@ etc. — see `sample_data/sample_scan_2026-08-14.csv` for an example), then:
   the same file twice results in two copies, distinguishable by the
   `Imported At` timestamp column.
 - **Clear All Data** wipes the store (confirmation required).
-
-Note: this UI consumes the output of a "3-Pillar scan" scoring stage
-(PASS/FAIL pillars, `SUPER_PERFORMER` status, suggested stop-loss/allocation)
-that doesn't exist as a script in this project yet — `enrich_momentum_metrics.py`
-produces the raw inputs (ATH, returns, EMA, TTM PAT) but not that
-classification layer.
 
 ### Scan-over-scan comparison
 
@@ -149,3 +198,12 @@ read from the source file), regardless of which convention a file uses.
 - **TTM PAT ATH** is capped at whatever quarters Screener.in's free tier
   exposes (~13 quarters, ~3.25 years) — it's the max TTM within that window,
   not a true multi-decade lifetime ATH.
+- **`Lifetime_ATH_Price`, 52-week returns, and 200 EMA are always "as of when
+  enrich_momentum_metrics.py was run,"** not "as of the market date being
+  scanned." Only `Closing_Price_INR` (from the bhavcopy) is truly pinned to
+  that date. Re-running the 3-pillar scan for an *older* date after time has
+  passed can therefore shift Pillar 1/3 results (e.g. a stock's ATH may have
+  risen since, making it look further from its high than it actually was on
+  that date). For the *latest* date, scanned promptly, this drift is minimal.
+  Run `./run_pipeline.sh` again before scanning if you want genuinely current
+  numbers rather than whatever's already on disk.

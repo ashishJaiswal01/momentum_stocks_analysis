@@ -107,12 +107,26 @@
   }
   thead th:hover { color: var(--text); }
   thead th .arrow { margin-left: 4px; opacity: 0.5; }
+  thead th.dragging { opacity: 0.4; }
+  thead th.drag-over { box-shadow: inset 2px 0 0 var(--accent); }
   tbody td {
     padding: 8px 10px;
     border-bottom: 1px solid #1c2333;
     white-space: nowrap;
   }
   tbody tr:hover { background: #141a28; }
+
+  .ai-commentary {
+    max-width: 320px;
+    white-space: normal;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.4;
+  }
 
   .badge {
     display: inline-block;
@@ -163,6 +177,9 @@
     <div class="sub">Import scan CSVs, filter, and export. Data accumulates across imports in a local SQLite file.</div>
   </div>
   <div class="row">
+    <select id="scan-date-select" title="Market data date to scan"></select>
+    <button id="run-scan-btn">Run 3-Pillar Scan</button>
+    <span style="width:1px; height:26px; background:var(--border); margin:0 4px;"></span>
     <input type="file" id="file-input" accept=".csv" />
     <button id="import-btn">Import CSV</button>
   </div>
@@ -224,6 +241,9 @@
         <button id="reset-btn" class="secondary">Reset</button>
       </div>
       <div class="field" style="margin-left: auto;">
+        <button id="reset-columns-btn" class="secondary" title="Restore default column order">Reset Columns</button>
+      </div>
+      <div class="field">
         <button id="export-btn" class="secondary">Export CSV</button>
       </div>
       <div class="field">
@@ -247,15 +267,31 @@
 </main>
 
 <script>
-const COLUMNS = [
+const DEFAULT_COLUMNS = [
   "Ticker_Symbol","Company_Name","Entry_Status","Closing_Price_INR",
   "Previous_Closing_Price_INR","Gain_Loss_Pct","Suggestion",
   "Scan_Date","Sector_Index","Lifetime_ATH_Price","Dist_From_ATH_Pct",
   "Pillar_1_ATH_Price_Status","Latest_TTM_PAT_Cr","Pillar_2_ATH_PAT_Status",
   "Stock_52W_Return_Pct","Nifty500_52W_Return_Pct","Sector_52W_Return_Pct",
   "Relative_Alpha_Pct","Pillar_3_Outperformance_Status","Pillars_Met_Count",
-  "Status","Suggested_200_EMA_SL","Target_Allocation_Pct","imported_at",
+  "Status","AI_Commentary","Suggested_200_EMA_SL","Target_Allocation_Pct","imported_at",
 ];
+const COLUMN_ORDER_STORAGE_KEY = "momentum_scan_column_order";
+let COLUMNS = [...DEFAULT_COLUMNS];
+
+function loadColumnOrder() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLUMN_ORDER_STORAGE_KEY) || "null");
+    if (Array.isArray(saved) && saved.length === DEFAULT_COLUMNS.length
+        && saved.every(c => DEFAULT_COLUMNS.includes(c))) {
+      COLUMNS = saved;
+    }
+  } catch (e) { /* corrupt storage - keep default order */ }
+}
+
+function saveColumnOrder() {
+  localStorage.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(COLUMNS));
+}
 
 const COLUMN_LABELS = {
   imported_at: "Imported At",
@@ -263,6 +299,7 @@ const COLUMN_LABELS = {
   Closing_Price_INR: "Current Price",
   Gain_Loss_Pct: "Gain/Loss %",
   Entry_Status: "Entry Status",
+  AI_Commentary: "AI Commentary",
 };
 
 let currentRows = [];
@@ -333,6 +370,10 @@ function escapeAttr(s) { return escapeHtml(s); }
 
 function renderCell(col, value) {
   const v = value ?? "";
+  if (col === "AI_Commentary") {
+    if (!v) return `<span style="color:var(--muted)">—</span>`;
+    return `<div class="ai-commentary" title="${escapeAttr(v)}">${escapeHtml(v)}</div>`;
+  }
   if (col === "imported_at") {
     if (!v) return "";
     const d = new Date(v);
@@ -374,6 +415,45 @@ function renderCell(col, value) {
   return escapeHtml(v);
 }
 
+// Plain mouse-event column reordering (not native HTML5 drag-and-drop -
+// more consistent across browsers/automation and gives full control over
+// the drop-target highlight).
+const colDrag = { active: false, srcCol: null, startX: 0, startY: 0, suppressClick: false };
+const DRAG_THRESHOLD_PX = 5;
+
+function onColumnMouseMove(e) {
+  if (!colDrag.srcCol) return;
+  if (!colDrag.active) {
+    if (Math.abs(e.clientX - colDrag.startX) < DRAG_THRESHOLD_PX
+        && Math.abs(e.clientY - colDrag.startY) < DRAG_THRESHOLD_PX) return;
+    colDrag.active = true;
+    qs("table-head").querySelector(`th[data-col="${colDrag.srcCol}"]`)?.classList.add("dragging");
+  }
+  qs("table-head").querySelectorAll("th").forEach(t => t.classList.remove("drag-over"));
+  const target = document.elementFromPoint(e.clientX, e.clientY)?.closest("th");
+  if (target && target.dataset.col !== colDrag.srcCol) target.classList.add("drag-over");
+}
+
+function onColumnMouseUp(e) {
+  document.removeEventListener("mousemove", onColumnMouseMove);
+  document.removeEventListener("mouseup", onColumnMouseUp);
+  if (colDrag.active) {
+    colDrag.suppressClick = true;
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest("th");
+    const targetCol = target?.dataset.col;
+    if (targetCol && targetCol !== colDrag.srcCol) {
+      const fromIdx = COLUMNS.indexOf(colDrag.srcCol);
+      const toIdx = COLUMNS.indexOf(targetCol);
+      COLUMNS.splice(fromIdx, 1);
+      COLUMNS.splice(toIdx, 0, colDrag.srcCol);
+      saveColumnOrder();
+    }
+    renderTable();
+  }
+  colDrag.active = false;
+  colDrag.srcCol = null;
+}
+
 function renderTable() {
   const head = qs("table-head");
   head.innerHTML = COLUMNS.map(c => {
@@ -383,10 +463,18 @@ function renderTable() {
   }).join("");
   head.querySelectorAll("th").forEach(th => {
     th.addEventListener("click", () => {
+      if (colDrag.suppressClick) { colDrag.suppressClick = false; return; }
       const col = th.dataset.col;
       if (sortCol === col) sortDir *= -1; else { sortCol = col; sortDir = 1; }
       sortRows();
       renderTable();
+    });
+    th.addEventListener("mousedown", (e) => {
+      colDrag.srcCol = th.dataset.col;
+      colDrag.startX = e.clientX;
+      colDrag.startY = e.clientY;
+      document.addEventListener("mousemove", onColumnMouseMove);
+      document.addEventListener("mouseup", onColumnMouseUp);
     });
   });
 
@@ -399,6 +487,41 @@ function renderTable() {
     ).join("");
   }
   qs("stat-showing").textContent = currentRows.length;
+}
+
+function renderImportResult(data, actionVerb) {
+  const status = qs("import-status");
+  status.className = "ok";
+  let msg = `${actionVerb} ${data.inserted} row(s) — ${data.new_entrants} new entrant(s), ${data.existing} existing (${data.skipped} skipped). Total records: ${data.total_records}.`;
+  if (data.scan_meta) {
+    const m = data.scan_meta;
+    msg = `Scanned ${m.universe_size} stocks for ${m.market_data_date}: `
+      + `${m.super_performer} SUPER_PERFORMER, ${m.performer} PERFORMER, ${m.exit_sell} EXIT_SELL, `
+      + `${m.excluded} excluded (≤1 pillar, never tracked). ` + msg;
+  }
+  if (data.duplicate_tickers_in_file) {
+    msg += ` Deduplicated ${data.duplicate_tickers_in_file} repeated ticker(s) within the file (kept the last row for each).`;
+  }
+  if (data.unknown_columns && data.unknown_columns.length) {
+    msg += ` Ignored unrecognized columns: ${data.unknown_columns.join(", ")}.`;
+  }
+  if (data.unmapped_expected_columns && data.unmapped_expected_columns.length) {
+    msg += ` Left blank (no matching column found): ${data.unmapped_expected_columns.join(", ")}.`;
+  }
+  if (data.unrecognized_dates) {
+    msg += ` Warning: ${data.unrecognized_dates} row(s) had a Scan Date format I couldn't parse — stored as-is, may sort/filter oddly.`;
+  }
+  status.textContent = msg;
+
+  const banner = qs("exited-banner");
+  if (data.exited_tickers && data.exited_tickers.length) {
+    banner.style.display = "block";
+    banner.innerHTML = `<strong>${data.exited_tickers.length} stock(s) dropped out of the screen</strong> `
+      + `(present in the previous scan, not in this one): ${data.exited_tickers.map(escapeHtml).join(", ")}. `
+      + `Their historical rows are still preserved below.`;
+  } else {
+    banner.style.display = "none";
+  }
 }
 
 qs("import-btn").addEventListener("click", async () => {
@@ -419,32 +542,7 @@ qs("import-btn").addEventListener("click", async () => {
       status.textContent = "Import failed: " + (data.error || "unknown error");
       return;
     }
-    status.className = "ok";
-    let msg = `Appended ${data.inserted} row(s) — ${data.new_entrants} new entrant(s), ${data.existing} existing (${data.skipped} skipped). Total records: ${data.total_records}.`;
-    if (data.duplicate_tickers_in_file) {
-      msg += ` Deduplicated ${data.duplicate_tickers_in_file} repeated ticker(s) within the file (kept the last row for each).`;
-    }
-    if (data.unknown_columns && data.unknown_columns.length) {
-      msg += ` Ignored unrecognized columns: ${data.unknown_columns.join(", ")}.`;
-    }
-    if (data.unmapped_expected_columns && data.unmapped_expected_columns.length) {
-      msg += ` Left blank (no matching column found): ${data.unmapped_expected_columns.join(", ")}.`;
-    }
-    if (data.unrecognized_dates) {
-      msg += ` Warning: ${data.unrecognized_dates} row(s) had a Scan Date format I couldn't parse — stored as-is, may sort/filter oddly.`;
-    }
-    status.textContent = msg;
-
-    const banner = qs("exited-banner");
-    if (data.exited_tickers && data.exited_tickers.length) {
-      banner.style.display = "block";
-      banner.innerHTML = `<strong>${data.exited_tickers.length} stock(s) dropped out of the screen</strong> `
-        + `(present in the previous scan, not in this one): ${data.exited_tickers.map(escapeHtml).join(", ")}. `
-        + `Their historical rows are still preserved below.`;
-    } else {
-      banner.style.display = "none";
-    }
-
+    renderImportResult(data, "Appended");
     fileInput.value = "";
     await loadMeta();
     await loadData();
@@ -453,6 +551,49 @@ qs("import-btn").addEventListener("click", async () => {
     status.textContent = "Import failed: " + e;
   }
 });
+
+qs("run-scan-btn").addEventListener("click", async () => {
+  const status = qs("import-status");
+  const dateSel = qs("scan-date-select");
+  const selectedDate = dateSel.value;
+  status.className = "";
+  status.textContent = `Running 3-Pillar scan for ${selectedDate || "the latest date"}…`;
+  qs("run-scan-btn").disabled = true;
+  try {
+    const res = await fetch("/api/run-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date: selectedDate }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      status.className = "err";
+      status.textContent = "Scan failed: " + (data.error || "unknown error");
+      return;
+    }
+    renderImportResult(data, "Appended");
+    await loadMeta();
+    await loadData();
+  } catch (e) {
+    status.className = "err";
+    status.textContent = "Scan failed: " + e;
+  } finally {
+    qs("run-scan-btn").disabled = false;
+  }
+});
+
+async function loadScanDates() {
+  const res = await fetch("/api/bhavcopy-dates");
+  const meta = await res.json();
+  const sel = qs("scan-date-select");
+  if (!meta.dates || meta.dates.length === 0) {
+    sel.innerHTML = '<option value="">No bhavcopy data found</option>';
+    qs("run-scan-btn").disabled = true;
+    return;
+  }
+  sel.innerHTML = meta.dates.map(d => `<option value="${d}">${d}${d === meta.latest ? " (latest)" : ""}</option>`).join("");
+  sel.value = meta.latest || meta.dates[0];
+}
 
 qs("apply-btn").addEventListener("click", loadData);
 qs("f-search").addEventListener("keydown", e => { if (e.key === "Enter") loadData(); });
@@ -483,12 +624,21 @@ qs("clear-btn").addEventListener("click", async () => {
   await loadData();
 });
 
+qs("reset-columns-btn").addEventListener("click", () => {
+  COLUMNS = [...DEFAULT_COLUMNS];
+  localStorage.removeItem(COLUMN_ORDER_STORAGE_KEY);
+  renderTable();
+});
+
 (async function init() {
   if (window.location.protocol === "file:") {
     qs("file-protocol-warning").style.display = "block";
     qs("import-btn").disabled = true;
+    qs("run-scan-btn").disabled = true;
     return;
   }
+  loadColumnOrder();
+  await loadScanDates();
   await loadMeta();
   await loadData();
 })();
