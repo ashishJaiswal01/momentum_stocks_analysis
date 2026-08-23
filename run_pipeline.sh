@@ -17,8 +17,12 @@ echo ">>> Step 1/2: Downloading NSE COM-UDiFF bhavcopy"
 "$PYTHON" nse_udiff_bhavcopy.py --output "$OUTPUT_DIR" "$@"
 
 echo
-echo ">>> Step 2/2: Enriching Nifty 500 momentum metrics"
+echo ">>> Step 2/3: Enriching Nifty 500 momentum metrics (Strategy 1)"
 "$PYTHON" enrich_momentum_metrics.py --output "$OUTPUT_DIR"
+
+echo
+echo ">>> Step 3/3: Enriching Nifty 500 momentum metrics (Strategy 2)"
+"$PYTHON" enrich_momentum_metrics_v2.py --output "$OUTPUT_DIR"
 
 echo
 echo ">>> Pipeline complete."
