@@ -517,7 +517,7 @@ function renderCell(col, value, marked = false) {
   const v = value ?? "";
   if (col === "Ticker_Symbol") {
     return marked
-      ? `${escapeHtml(v)}<span class="cross-super-marker" title="SUPER_PERFORMER and also tracked in the other strategy">*</span>`
+      ? `${escapeHtml(v)}<span class="cross-super-marker" title="SUPER_PERFORMER in both Strategy 1 and Strategy 2">*</span>`
       : escapeHtml(v);
   }
   if (col === "AI_Commentary") {
@@ -565,8 +565,8 @@ function renderCell(col, value, marked = false) {
   return escapeHtml(v);
 }
 
-function isCrossStrategySuperPerformer(row, otherStrategyTickers) {
-  return row.Status === "SUPER_PERFORMER" && otherStrategyTickers.has(row.Ticker_Symbol);
+function isCrossStrategySuperPerformer(row, otherStrategySuperPerformerTickers) {
+  return row.Status === "SUPER_PERFORMER" && otherStrategySuperPerformerTickers.has(row.Ticker_Symbol);
 }
 
 // Plain mouse-event column reordering (not native HTML5 drag-and-drop -
@@ -636,9 +636,9 @@ function renderTable() {
   if (currentRows.length === 0) {
     body.innerHTML = `<tr><td colspan="${COLUMNS.length}"><div class="empty">No records match the current filters. Import a CSV or adjust filters.</div></td></tr>`;
   } else {
-    const v2Tickers = new Set(currentRowsV2.filter(r => r.Ticker_Symbol).map(r => r.Ticker_Symbol));
+    const v2SuperTickers = new Set(currentRowsV2.filter(r => r.Ticker_Symbol && r.Status === "SUPER_PERFORMER").map(r => r.Ticker_Symbol));
     body.innerHTML = currentRows.map(r =>
-      "<tr>" + COLUMNS.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v2Tickers))}</td>`).join("") + "</tr>"
+      "<tr>" + COLUMNS.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v2SuperTickers))}</td>`).join("") + "</tr>"
     ).join("");
   }
   qs("stat-showing").textContent = currentRows.length;
@@ -964,9 +964,9 @@ function renderTableV2() {
   if (currentRowsV2.length === 0) {
     body.innerHTML = `<tr><td colspan="${COLUMNS_V2.length}"><div class="empty">No records match the current filters. Import a CSV or run a scan.</div></td></tr>`;
   } else {
-    const v1Tickers = new Set(currentRows.filter(r => r.Ticker_Symbol).map(r => r.Ticker_Symbol));
+    const v1SuperTickers = new Set(currentRows.filter(r => r.Ticker_Symbol && r.Status === "SUPER_PERFORMER").map(r => r.Ticker_Symbol));
     body.innerHTML = currentRowsV2.map(r =>
-      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v1Tickers))}</td>`).join("") + "</tr>"
+      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v1SuperTickers))}</td>`).join("") + "</tr>"
     ).join("");
   }
   qs("stat-showing-v2").textContent = currentRowsV2.length;
