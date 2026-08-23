@@ -143,6 +143,7 @@
   .badge.info { background: rgba(79,140,255,0.18); color: var(--accent); }
   .neg { color: var(--fail); }
   .pos { color: var(--pass); }
+  .cross-super-marker { color: var(--qualifier); font-weight: 700; margin-left: 3px; }
 
   #exited-banner {
     display: none;
@@ -512,8 +513,13 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
-function renderCell(col, value) {
+function renderCell(col, value, marked = false) {
   const v = value ?? "";
+  if (col === "Ticker_Symbol") {
+    return marked
+      ? `${escapeHtml(v)}<span class="cross-super-marker" title="SUPER_PERFORMER and also tracked in the other strategy">*</span>`
+      : escapeHtml(v);
+  }
   if (col === "AI_Commentary") {
     if (!v) return `<span style="color:var(--muted)">—</span>`;
     return `<div class="ai-commentary" title="${escapeAttr(v)}">${escapeHtml(v)}</div>`;
@@ -557,6 +563,10 @@ function renderCell(col, value) {
     if (!isNaN(n)) return `<span class="${n < 0 ? 'neg' : 'pos'}">${escapeHtml(v)}</span>`;
   }
   return escapeHtml(v);
+}
+
+function isCrossStrategySuperPerformer(row, otherStrategyTickers) {
+  return row.Status === "SUPER_PERFORMER" && otherStrategyTickers.has(row.Ticker_Symbol);
 }
 
 // Plain mouse-event column reordering (not native HTML5 drag-and-drop -
@@ -626,8 +636,9 @@ function renderTable() {
   if (currentRows.length === 0) {
     body.innerHTML = `<tr><td colspan="${COLUMNS.length}"><div class="empty">No records match the current filters. Import a CSV or adjust filters.</div></td></tr>`;
   } else {
+    const v2Tickers = new Set(currentRowsV2.filter(r => r.Ticker_Symbol).map(r => r.Ticker_Symbol));
     body.innerHTML = currentRows.map(r =>
-      "<tr>" + COLUMNS.map(c => `<td>${renderCell(c, r[c])}</td>`).join("") + "</tr>"
+      "<tr>" + COLUMNS.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v2Tickers))}</td>`).join("") + "</tr>"
     ).join("");
   }
   qs("stat-showing").textContent = currentRows.length;
@@ -774,7 +785,7 @@ qs("reset-columns-btn").addEventListener("click", () => {
   renderTable();
 });
 
-(async function init() {
+const initV1Ready = (async function init() {
   if (window.location.protocol === "file:") {
     qs("file-protocol-warning").style.display = "block";
     qs("import-btn").disabled = true;
@@ -953,8 +964,9 @@ function renderTableV2() {
   if (currentRowsV2.length === 0) {
     body.innerHTML = `<tr><td colspan="${COLUMNS_V2.length}"><div class="empty">No records match the current filters. Import a CSV or run a scan.</div></td></tr>`;
   } else {
+    const v1Tickers = new Set(currentRows.filter(r => r.Ticker_Symbol).map(r => r.Ticker_Symbol));
     body.innerHTML = currentRowsV2.map(r =>
-      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c])}</td>`).join("") + "</tr>"
+      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v1Tickers))}</td>`).join("") + "</tr>"
     ).join("");
   }
   qs("stat-showing-v2").textContent = currentRowsV2.length;
@@ -1118,7 +1130,7 @@ qs("tab-btn-2").addEventListener("click", () => {
   qs("tab1-content").style.display = "none";
 });
 
-(async function initV2() {
+const initV2Ready = (async function initV2() {
   if (window.location.protocol === "file:") {
     qs("file-protocol-warning-v2").style.display = "block";
     qs("import-btn-v2").disabled = true;
@@ -1130,6 +1142,15 @@ qs("tab-btn-2").addEventListener("click", () => {
   await loadMetaV2();
   await loadDataV2();
 })();
+
+// Strategy 1 and Strategy 2 load independently and in parallel, so whichever
+// finishes first renders its table before the other strategy's data (needed
+// for the cross-strategy SUPER_PERFORMER "*" marker) has arrived. Once both
+// are done, re-render both tables so the markers reflect the full picture.
+Promise.all([initV1Ready, initV2Ready]).then(() => {
+  renderTable();
+  renderTableV2();
+});
 </script>
 </body>
 </html>
