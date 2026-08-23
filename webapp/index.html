@@ -963,7 +963,7 @@ function renderTableV2() {
 function renderImportResultV2(data, actionVerb) {
   const status = qs("import-status-v2");
   status.className = "ok";
-  let msg = `${actionVerb} ${data.inserted} row(s) — ${data.new_entrants} new entrant(s), ${data.existing} existing (${data.skipped} skipped). Total records: ${data.total_records}.`;
+  let msg = `${actionVerb}: ${data.inserted} new row(s), ${data.updated} existing row(s) updated (${data.skipped} skipped). Total stocks tracked: ${data.total_records}.`;
   if (data.scan_meta) {
     const m = data.scan_meta;
     const gate = m.macro_gate_pass ? "OPEN" : "CLOSED (new BUYs halted)";
@@ -990,7 +990,7 @@ function renderImportResultV2(data, actionVerb) {
     banner.style.display = "block";
     banner.innerHTML = `<strong>${data.exited_tickers.length} stock(s) dropped out of the screen</strong> `
       + `(present in the previous scan, not in this one): ${data.exited_tickers.map(escapeHtml).join(", ")}. `
-      + `Their historical rows are still preserved below.`;
+      + `Their row below still shows their last scanned data - it wasn't refreshed this run.`;
   } else {
     banner.style.display = "none";
   }
@@ -1014,7 +1014,7 @@ qs("import-btn-v2").addEventListener("click", async () => {
       status.textContent = "Import failed: " + (data.error || "unknown error");
       return;
     }
-    renderImportResultV2(data, "Appended");
+    renderImportResultV2(data, "Synced");
     fileInput.value = "";
     await loadMetaV2();
     await loadDataV2();
@@ -1043,7 +1043,7 @@ qs("run-scan-btn-v2").addEventListener("click", async () => {
       status.textContent = "Scan failed: " + (data.error || "unknown error");
       return;
     }
-    renderImportResultV2(data, "Appended");
+    renderImportResultV2(data, "Synced");
     await loadMetaV2();
     await loadDataV2();
   } catch (e) {
