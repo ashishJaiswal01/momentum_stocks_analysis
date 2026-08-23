@@ -1048,7 +1048,10 @@ qs("run-scan-btn-v2").addEventListener("click", async () => {
     await loadDataV2();
   } catch (e) {
     status.className = "err";
-    status.textContent = "Scan failed: " + e;
+    const hint = String(e).includes("Failed to fetch")
+      ? " (the server may not be running, or it restarted mid-request — check the terminal running ./run_webapp.sh, then reload this page and try again)"
+      : "";
+    status.textContent = "Scan failed: " + e + hint;
   } finally {
     qs("run-scan-btn-v2").disabled = false;
   }
@@ -1059,7 +1062,7 @@ async function loadScanDatesV2() {
   const meta = await res.json();
   const sel = qs("scan-date-select-v2");
   if (!meta.dates || meta.dates.length === 0) {
-    sel.innerHTML = '<option value="">No bhavcopy data found</option>';
+    sel.innerHTML = '<option value="">Run enrich_momentum_metrics_v2.py first</option>';
     qs("run-scan-btn-v2").disabled = true;
     return;
   }

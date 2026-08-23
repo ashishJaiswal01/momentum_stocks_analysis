@@ -986,4 +986,8 @@ def api_clear_v2():
 if __name__ == "__main__":
     init_db()
     init_db_v2()
-    app.run(host="127.0.0.1", port=5057, debug=False)
+    # threaded=True: the dev server is single-request-at-a-time otherwise, so
+    # a slow scan (AI commentary, Screener-backed data, etc.) would make any
+    # other concurrent request (e.g. the page's own meta/data fetches) queue
+    # and potentially time out client-side as a generic "Failed to fetch".
+    app.run(host="127.0.0.1", port=5057, debug=False, threaded=True)
