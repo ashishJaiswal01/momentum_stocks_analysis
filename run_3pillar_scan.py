@@ -10,11 +10,11 @@ Classifies every Nifty 500 stock in a given market date's enriched metrics
   Pillar 3 (Outperformance) - trailing 52-week return beats both the Nifty 500
                           benchmark and (where available) its sector index
 
-Status: 3/3 pillars -> SUPER_PERFORMER, 2/3 -> PERFORMER, <=1 -> disqualified.
-A newly-disqualified stock is dropped from the output entirely (never
-tracked) UNLESS it was already being tracked in a previous scan (read from
-the web app's data/scan_results.db), in which case it's kept one more time
-with Status=EXIT_SELL so the exit is visible.
+Status: 3/3 pillars -> SUPER_PERFORMER, 2/3 -> PERFORMER, <=1 -> dropped from
+the output entirely, regardless of whether it was tracked in a previous scan
+(a stock that falls off the screen this way simply won't appear in this
+scan's rows - the web app's own "dropped out of the screen" banner is what
+surfaces that on import, not a Status value here).
 
 Output is a flat CSV (no arrow/transition notation) using the app's plain
 19-column scan schema plus one extra AI_Commentary column - Entry_Status,
@@ -24,8 +24,8 @@ own import history.
 
 AI_Commentary is a short, factual, plain-English rationale generated via the
 OpenAI API (config in .env - see .env.example) for each stock that makes the
-final cut (SUPER_PERFORMER/PERFORMER/EXIT_SELL only, not the full 500-stock
-universe, to keep API usage bounded). The underlying pillar math above is
+final cut (SUPER_PERFORMER/PERFORMER only, not the full 500-stock universe,
+to keep API usage bounded). The underlying pillar math above is
 100% deterministic and unaffected by this - the AI only narrates numbers
 that were already computed; it never recalculates or overrides them. If no
 OPENAI_API_KEY is configured, this column is simply left blank.
@@ -40,7 +40,6 @@ import argparse
 import csv
 import json
 import os
-import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -165,30 +164,6 @@ def load_enriched_rows(output_dir: Path, market_date: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def get_previously_tracked_tickers(db_path: Path) -> set[str]:
-    """Tickers from the single most recent batch already persisted in the
-    web app's store - used to decide whether a now-disqualified stock should
-    still appear (flagged EXIT_SELL) or be dropped as never having qualified."""
-    if not db_path.exists():
-        return set()
-    conn = sqlite3.connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT imported_at FROM scan_results ORDER BY imported_at DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            return set()
-        tickers = conn.execute(
-            'SELECT DISTINCT "Ticker_Symbol" FROM scan_results WHERE imported_at = ?',
-            (row[0],),
-        ).fetchall()
-        return {t[0] for t in tickers}
-    except sqlite3.OperationalError:
-        return set()
-    finally:
-        conn.close()
-
-
 def _build_commentary_prompt(row: dict) -> str:
     return (
         f"Stock: {row['Company_Name']} ({row['Ticker_Symbol']}), Sector: {row['Sector_Index']}\n"
@@ -242,10 +217,9 @@ def generate_ai_commentary(rows: list[dict]) -> tuple[int, int]:
 
 def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = False) -> dict:
     rows = load_enriched_rows(output_dir, market_date)
-    previously_tracked = get_previously_tracked_tickers(output_dir / "scan_results.db")
 
     out_rows = []
-    super_performer = performer = exit_sell = excluded = 0
+    super_performer = performer = excluded = 0
 
     for row in rows:
         ticker = (row.get("symbol") or "").strip().upper()
@@ -257,18 +231,14 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
             status = "SUPER_PERFORMER"
         elif pr.pillars_met == 2:
             status = "PERFORMER"
-        elif ticker in previously_tracked:
-            status = "EXIT_SELL"
         else:
             excluded += 1
-            continue  # never tracked, still disqualified - not surfaced
+            continue  # <=1 pillar met - dropped from output regardless of prior tracking
 
         if status == "SUPER_PERFORMER":
             super_performer += 1
-        elif status == "PERFORMER":
-            performer += 1
         else:
-            exit_sell += 1
+            performer += 1
 
         out_rows.append({
             "Scan_Date": market_date,
@@ -315,7 +285,6 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         "universe_size": len(rows),
         "super_performer": super_performer,
         "performer": performer,
-        "exit_sell": exit_sell,
         "excluded": excluded,
         "total_output_rows": len(out_rows),
         "ai_commentary_ok": ai_ok,
@@ -340,7 +309,7 @@ def resolve_market_date(output_dir: Path, requested: str | None) -> str:
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="3-Pillar Momentum Screening Engine - classifies stocks from an "
-                    "enrich_momentum_metrics.py run into SUPER_PERFORMER/PERFORMER/EXIT_SELL.",
+                    "enrich_momentum_metrics.py run into SUPER_PERFORMER/PERFORMER.",
     )
     parser.add_argument("--output", type=str, default="data",
                          help="Base directory shared with the rest of the pipeline (default: data)")
@@ -376,8 +345,7 @@ def main(argv=None) -> int:
     print(f"Universe scanned   : {meta['universe_size']}")
     print(f"SUPER_PERFORMER    : {meta['super_performer']}")
     print(f"PERFORMER          : {meta['performer']}")
-    print(f"EXIT_SELL          : {meta['exit_sell']}")
-    print(f"Excluded (<=1 pillar, never tracked): {meta['excluded']}")
+    print(f"Excluded (<=1 pillar met): {meta['excluded']}")
     print(f"Total output rows  : {meta['total_output_rows']}")
     print(f"AI commentary      : {meta['ai_commentary_ok']} ok, {meta['ai_commentary_failed']} failed")
     print(f"CSV                : {meta['csv_path']}")

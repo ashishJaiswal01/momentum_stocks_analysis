@@ -167,10 +167,38 @@
     padding: 40px;
     color: var(--muted);
   }
+
+  .tabs {
+    display: flex;
+    gap: 2px;
+    padding: 10px 28px 0 28px;
+    background: var(--bg);
+  }
+  .tab-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 9px 18px;
+    border-radius: 8px 8px 0 0;
+    cursor: pointer;
+  }
+  .tab-btn.active {
+    background: var(--panel);
+    color: var(--text);
+  }
+  .tab-btn:hover { color: var(--text); }
 </style>
 </head>
 <body>
 
+<div class="tabs">
+  <button class="tab-btn active" id="tab-btn-1">Momentum Strategy 1</button>
+  <button class="tab-btn" id="tab-btn-2">Momentum Strategy 2</button>
+</div>
+
+<div id="tab1-content">
 <header>
   <div>
     <h1>3-Pillar Momentum Scan — Data Browser</h1>
@@ -265,12 +293,127 @@
     </table>
   </div>
 </main>
+</div>
+
+<div id="tab2-content" style="display:none">
+<header>
+  <div>
+    <h1>Institutional Momentum Screening &amp; Execution — Strategy 2</h1>
+    <div class="sub" style="max-width: 900px;">
+      A stricter, institutional-grade momentum screen. Before scoring any stock, two
+      non-negotiable gates apply: a <strong>macro regime gate</strong> (Nifty 500 must be
+      above its 200-day SMA with the 50-day SMA at or above the 200-day SMA, or all new
+      BUY entries halt system-wide) and a <strong>liquidity gate</strong> (90-day average
+      daily traded value &ge; &#8377;5 Cr and market cap &ge; &#8377;2,000 Cr). Surviving stocks are then
+      scored on three pillars: <strong>52-week-high anchor + trend</strong> (within 10% of the
+      52-week high, trading above both EMA50 and EMA200), <strong>earnings quality</strong>
+      (EPS near its 3-year peak or growing &ge;15% YoY, operating cash flow covering
+      reported profit, 3-year ROE &ge;12% with controlled leverage), and <strong>dual
+      relative strength</strong> (12-month return skipping the most recent month, beating
+      both the Nifty 500 and the stock's sector). All 3 pillars plus both gates open ->
+      <strong>SUPER_PERFORMER</strong> (Tier 1, equal-weighted 5-7% position, stop at
+      max(EMA50, entry &minus; 3&times;ATR14)); Pillar 1 + Pillar 2 only -> <strong>PERFORMER</strong>
+      (Tier 2, hold); anything else (Pillar 1 broken, cash-flow test failed, or liquidity
+      no longer sufficient) is dropped from the scan entirely, regardless of prior tracking.
+      Intended for monthly/bi-weekly rebalancing, not daily trading.
+    </div>
+  </div>
+  <div class="row">
+    <select id="scan-date-select-v2" title="Market data date to scan"></select>
+    <button id="run-scan-btn-v2">Run Strategy 2 Scan</button>
+    <span style="width:1px; height:26px; background:var(--border); margin:0 4px;"></span>
+    <input type="file" id="file-input-v2" accept=".csv" />
+    <button id="import-btn-v2">Import CSV</button>
+  </div>
+</header>
+
+<main>
+  <div id="file-protocol-warning-v2" style="display:none; background:#3a1a1a; border:1px solid #6b2b2b; color:#f87171; border-radius:10px; padding:14px 18px; margin-bottom:18px; font-size:13px; line-height:1.5;">
+    <strong>This page was opened directly from disk (file://), so it has no backend to talk to — every action here will fail.</strong><br>
+    Start the server instead: run <code>./run_webapp.sh</code> from the project folder, then open
+    <code>http://127.0.0.1:5057</code> in your browser.
+  </div>
+  <div id="import-status-v2"></div>
+  <div id="exited-banner-v2"></div>
+
+  <div class="panel">
+    <h2>Filters</h2>
+    <div class="row">
+      <div class="field">
+        <label>Scan Date From</label>
+        <input type="date" id="f-date-from-v2" />
+      </div>
+      <div class="field">
+        <label>Scan Date To</label>
+        <input type="date" id="f-date-to-v2" />
+      </div>
+      <div class="field">
+        <label>Sector</label>
+        <select id="f-sector-v2"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Status</label>
+        <select id="f-status-v2"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Min Pillars Met</label>
+        <select id="f-min-pillars-v2">
+          <option value="">Any</option>
+          <option value="1">1+</option>
+          <option value="2">2+</option>
+          <option value="3">3 (all)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Entry Status</label>
+        <select id="f-entry-status-v2"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Suggestion</label>
+        <select id="f-suggestion-v2"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label>Search (ticker / company)</label>
+        <input type="text" id="f-search-v2" placeholder="e.g. PHARM or Apollo" />
+      </div>
+      <div class="field">
+        <button id="apply-btn-v2">Apply Filters</button>
+      </div>
+      <div class="field">
+        <button id="reset-btn-v2" class="secondary">Reset</button>
+      </div>
+      <div class="field" style="margin-left: auto;">
+        <button id="reset-columns-btn-v2" class="secondary" title="Restore default column order">Reset Columns</button>
+      </div>
+      <div class="field">
+        <button id="export-btn-v2" class="secondary">Export CSV</button>
+      </div>
+      <div class="field">
+        <button id="clear-btn-v2" class="danger">Clear All Data</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <span>Total records: <b id="stat-total-v2">0</b></span>
+    <span>Showing: <b id="stat-showing-v2">0</b></span>
+    <span>Date range: <b id="stat-range-v2">—</b></span>
+  </div>
+
+  <div class="table-wrap">
+    <table id="data-table-v2">
+      <thead><tr id="table-head-v2"></tr></thead>
+      <tbody id="table-body-v2"></tbody>
+    </table>
+  </div>
+</main>
+</div>
 
 <script>
 const DEFAULT_COLUMNS = [
   "Ticker_Symbol","Company_Name","Entry_Status","Closing_Price_INR",
   "Previous_Closing_Price_INR","Gain_Loss_Pct","Suggestion",
-  "Scan_Date","Sector_Index","Lifetime_ATH_Price","Dist_From_ATH_Pct",
+  "Scan_Date","Original_Scan_Date","Sector_Index","Lifetime_ATH_Price","Dist_From_ATH_Pct",
   "Pillar_1_ATH_Price_Status","Latest_TTM_PAT_Cr","Pillar_2_ATH_PAT_Status",
   "Stock_52W_Return_Pct","Nifty500_52W_Return_Pct","Sector_52W_Return_Pct",
   "Relative_Alpha_Pct","Pillar_3_Outperformance_Status","Pillars_Met_Count",
@@ -299,6 +442,7 @@ const COLUMN_LABELS = {
   Closing_Price_INR: "Current Price",
   Gain_Loss_Pct: "Gain/Loss %",
   Entry_Status: "Entry Status",
+  Original_Scan_Date: "Original Scan Date",
   AI_Commentary: "AI Commentary",
 };
 
@@ -496,8 +640,8 @@ function renderImportResult(data, actionVerb) {
   if (data.scan_meta) {
     const m = data.scan_meta;
     msg = `Scanned ${m.universe_size} stocks for ${m.market_data_date}: `
-      + `${m.super_performer} SUPER_PERFORMER, ${m.performer} PERFORMER, ${m.exit_sell} EXIT_SELL, `
-      + `${m.excluded} excluded (≤1 pillar, never tracked). ` + msg;
+      + `${m.super_performer} SUPER_PERFORMER, ${m.performer} PERFORMER, `
+      + `${m.excluded} excluded (≤1 pillar met). ` + msg;
   }
   if (data.duplicate_tickers_in_file) {
     msg += ` Deduplicated ${data.duplicate_tickers_in_file} repeated ticker(s) within the file (kept the last row for each).`;
@@ -641,6 +785,347 @@ qs("reset-columns-btn").addEventListener("click", () => {
   await loadScanDates();
   await loadMeta();
   await loadData();
+})();
+
+// ============================================================================
+// Momentum Strategy 2 (Institutional Momentum Screening) - tab UI clone.
+// Duplicates the Strategy 1 UI/logic above verbatim (Strategy 1's code is
+// intentionally left completely untouched) pointed at the separate
+// /api/v2/* endpoints and v2-suffixed DOM elements. Reuses the pure,
+// stateless helpers above (qs, escapeHtml, escapeAttr, renderCell,
+// COLUMN_LABELS, DRAG_THRESHOLD_PX) since those don't depend on any
+// Strategy-1-specific state and are identical for both schemas.
+// ============================================================================
+
+const DEFAULT_COLUMNS_V2 = [...DEFAULT_COLUMNS];
+const COLUMN_ORDER_STORAGE_KEY_V2 = "momentum_scan_column_order_v2";
+let COLUMNS_V2 = [...DEFAULT_COLUMNS_V2];
+
+// Same underlying column keys as Strategy 1 (for schema/UI compatibility),
+// but several hold genuinely different data here (see run_momentum_strategy2_scan.py) -
+// label them for what they actually mean in this strategy.
+const COLUMN_LABELS_V2 = {
+  ...COLUMN_LABELS,
+  Lifetime_ATH_Price: "52-Week High Price",
+  Dist_From_ATH_Pct: "Dist. from 52W High",
+  Pillar_1_ATH_Price_Status: "Pillar 1 (52W High + Trend)",
+  Latest_TTM_PAT_Cr: "TTM PAT (Cr)",
+  Pillar_2_ATH_PAT_Status: "Pillar 2 (Quality / Cash-Flow / ROE)",
+  Stock_52W_Return_Pct: "12M-1M Momentum",
+  Nifty500_52W_Return_Pct: "Nifty 500 12M-1M %",
+  Sector_52W_Return_Pct: "Sector 12M-1M %",
+  Pillar_3_Outperformance_Status: "Pillar 3 (Dual Relative Strength)",
+  Suggested_200_EMA_SL: "Suggested Stop-Loss (ATR)",
+};
+
+function loadColumnOrderV2() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLUMN_ORDER_STORAGE_KEY_V2) || "null");
+    if (Array.isArray(saved) && saved.length === DEFAULT_COLUMNS_V2.length
+        && saved.every(c => DEFAULT_COLUMNS_V2.includes(c))) {
+      COLUMNS_V2 = saved;
+    }
+  } catch (e) { /* corrupt storage - keep default order */ }
+}
+function saveColumnOrderV2() {
+  localStorage.setItem(COLUMN_ORDER_STORAGE_KEY_V2, JSON.stringify(COLUMNS_V2));
+}
+
+let currentRowsV2 = [];
+let sortColV2 = "Scan_Date";
+let sortDirV2 = -1;
+
+function currentFilterParamsV2() {
+  const p = new URLSearchParams();
+  const map = {
+    date_from: qs("f-date-from-v2").value,
+    date_to: qs("f-date-to-v2").value,
+    sector: qs("f-sector-v2").value,
+    status: qs("f-status-v2").value,
+    min_pillars: qs("f-min-pillars-v2").value,
+    entry_status: qs("f-entry-status-v2").value,
+    suggestion: qs("f-suggestion-v2").value,
+    search: qs("f-search-v2").value,
+  };
+  for (const [k, v] of Object.entries(map)) if (v) p.set(k, v);
+  return p;
+}
+
+async function loadMetaV2() {
+  const res = await fetch("/api/v2/meta");
+  const meta = await res.json();
+  const selects = {
+    "f-sector-v2": meta.sectors,
+    "f-status-v2": meta.statuses,
+    "f-entry-status-v2": meta.entry_statuses,
+    "f-suggestion-v2": meta.suggestions,
+  };
+  for (const [id, options] of Object.entries(selects)) {
+    const el = qs(id);
+    const prev = el.value;
+    el.innerHTML = '<option value="">All</option>' + options.map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`).join("");
+    el.value = prev;
+  }
+  qs("stat-total-v2").textContent = meta.total_records;
+  qs("stat-range-v2").textContent = meta.date_min ? `${meta.date_min} → ${meta.date_max}` : "—";
+}
+
+async function loadDataV2() {
+  const params = currentFilterParamsV2();
+  const res = await fetch("/api/v2/data?" + params.toString());
+  currentRowsV2 = await res.json();
+  sortRowsV2();
+  renderTableV2();
+}
+
+function sortRowsV2() {
+  currentRowsV2.sort((a, b) => {
+    let av = a[sortColV2] ?? "", bv = b[sortColV2] ?? "";
+    const an = parseFloat(String(av).replace(/[%,]/g, ""));
+    const bn = parseFloat(String(bv).replace(/[%,]/g, ""));
+    let cmp;
+    if (!isNaN(an) && !isNaN(bn)) cmp = an - bn;
+    else cmp = String(av).localeCompare(String(bv));
+    return cmp * sortDirV2;
+  });
+}
+
+const colDragV2 = { active: false, srcCol: null, startX: 0, startY: 0, suppressClick: false };
+
+function onColumnMouseMoveV2(e) {
+  if (!colDragV2.srcCol) return;
+  if (!colDragV2.active) {
+    if (Math.abs(e.clientX - colDragV2.startX) < DRAG_THRESHOLD_PX
+        && Math.abs(e.clientY - colDragV2.startY) < DRAG_THRESHOLD_PX) return;
+    colDragV2.active = true;
+    qs("table-head-v2").querySelector(`th[data-col="${colDragV2.srcCol}"]`)?.classList.add("dragging");
+  }
+  qs("table-head-v2").querySelectorAll("th").forEach(t => t.classList.remove("drag-over"));
+  const target = document.elementFromPoint(e.clientX, e.clientY)?.closest("th");
+  if (target && target.dataset.col !== colDragV2.srcCol) target.classList.add("drag-over");
+}
+
+function onColumnMouseUpV2(e) {
+  document.removeEventListener("mousemove", onColumnMouseMoveV2);
+  document.removeEventListener("mouseup", onColumnMouseUpV2);
+  if (colDragV2.active) {
+    colDragV2.suppressClick = true;
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest("th");
+    const targetCol = target?.dataset.col;
+    if (targetCol && targetCol !== colDragV2.srcCol) {
+      const fromIdx = COLUMNS_V2.indexOf(colDragV2.srcCol);
+      const toIdx = COLUMNS_V2.indexOf(targetCol);
+      COLUMNS_V2.splice(fromIdx, 1);
+      COLUMNS_V2.splice(toIdx, 0, colDragV2.srcCol);
+      saveColumnOrderV2();
+    }
+    renderTableV2();
+  }
+  colDragV2.active = false;
+  colDragV2.srcCol = null;
+}
+
+function renderTableV2() {
+  const head = qs("table-head-v2");
+  head.innerHTML = COLUMNS_V2.map(c => {
+    const arrow = c === sortColV2 ? (sortDirV2 === 1 ? "▲" : "▼") : "";
+    const label = COLUMN_LABELS_V2[c] || c.replace(/_/g, " ");
+    return `<th data-col="${c}">${label} <span class="arrow">${arrow}</span></th>`;
+  }).join("");
+  head.querySelectorAll("th").forEach(th => {
+    th.addEventListener("click", () => {
+      if (colDragV2.suppressClick) { colDragV2.suppressClick = false; return; }
+      const col = th.dataset.col;
+      if (sortColV2 === col) sortDirV2 *= -1; else { sortColV2 = col; sortDirV2 = 1; }
+      sortRowsV2();
+      renderTableV2();
+    });
+    th.addEventListener("mousedown", (e) => {
+      colDragV2.srcCol = th.dataset.col;
+      colDragV2.startX = e.clientX;
+      colDragV2.startY = e.clientY;
+      document.addEventListener("mousemove", onColumnMouseMoveV2);
+      document.addEventListener("mouseup", onColumnMouseUpV2);
+    });
+  });
+
+  const body = qs("table-body-v2");
+  if (currentRowsV2.length === 0) {
+    body.innerHTML = `<tr><td colspan="${COLUMNS_V2.length}"><div class="empty">No records match the current filters. Import a CSV or run a scan.</div></td></tr>`;
+  } else {
+    body.innerHTML = currentRowsV2.map(r =>
+      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c])}</td>`).join("") + "</tr>"
+    ).join("");
+  }
+  qs("stat-showing-v2").textContent = currentRowsV2.length;
+}
+
+function renderImportResultV2(data, actionVerb) {
+  const status = qs("import-status-v2");
+  status.className = "ok";
+  let msg = `${actionVerb} ${data.inserted} row(s) — ${data.new_entrants} new entrant(s), ${data.existing} existing (${data.skipped} skipped). Total records: ${data.total_records}.`;
+  if (data.scan_meta) {
+    const m = data.scan_meta;
+    const gate = m.macro_gate_pass ? "OPEN" : "CLOSED (new BUYs halted)";
+    msg = `Scanned ${m.universe_size} stocks for ${m.market_data_date} (Macro Gate: ${gate}): `
+      + `${m.super_performer} SUPER_PERFORMER, ${m.performer} PERFORMER, `
+      + `${m.excluded} excluded (liquidity/pillars). ` + msg;
+  }
+  if (data.duplicate_tickers_in_file) {
+    msg += ` Deduplicated ${data.duplicate_tickers_in_file} repeated ticker(s) within the file (kept the last row for each).`;
+  }
+  if (data.unknown_columns && data.unknown_columns.length) {
+    msg += ` Ignored unrecognized columns: ${data.unknown_columns.join(", ")}.`;
+  }
+  if (data.unmapped_expected_columns && data.unmapped_expected_columns.length) {
+    msg += ` Left blank (no matching column found): ${data.unmapped_expected_columns.join(", ")}.`;
+  }
+  if (data.unrecognized_dates) {
+    msg += ` Warning: ${data.unrecognized_dates} row(s) had a Scan Date format I couldn't parse — stored as-is, may sort/filter oddly.`;
+  }
+  status.textContent = msg;
+
+  const banner = qs("exited-banner-v2");
+  if (data.exited_tickers && data.exited_tickers.length) {
+    banner.style.display = "block";
+    banner.innerHTML = `<strong>${data.exited_tickers.length} stock(s) dropped out of the screen</strong> `
+      + `(present in the previous scan, not in this one): ${data.exited_tickers.map(escapeHtml).join(", ")}. `
+      + `Their historical rows are still preserved below.`;
+  } else {
+    banner.style.display = "none";
+  }
+}
+
+qs("import-btn-v2").addEventListener("click", async () => {
+  const fileInput = qs("file-input-v2");
+  const file = fileInput.files[0];
+  const status = qs("import-status-v2");
+  if (!file) { status.className = "err"; status.textContent = "Choose a CSV file first."; return; }
+
+  const fd = new FormData();
+  fd.append("file", file);
+  status.className = "";
+  status.textContent = "Importing…";
+  try {
+    const res = await fetch("/api/v2/import", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      status.className = "err";
+      status.textContent = "Import failed: " + (data.error || "unknown error");
+      return;
+    }
+    renderImportResultV2(data, "Appended");
+    fileInput.value = "";
+    await loadMetaV2();
+    await loadDataV2();
+  } catch (e) {
+    status.className = "err";
+    status.textContent = "Import failed: " + e;
+  }
+});
+
+qs("run-scan-btn-v2").addEventListener("click", async () => {
+  const status = qs("import-status-v2");
+  const dateSel = qs("scan-date-select-v2");
+  const selectedDate = dateSel.value;
+  status.className = "";
+  status.textContent = `Running Strategy 2 scan for ${selectedDate || "the latest date"}…`;
+  qs("run-scan-btn-v2").disabled = true;
+  try {
+    const res = await fetch("/api/v2/run-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date: selectedDate }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      status.className = "err";
+      status.textContent = "Scan failed: " + (data.error || "unknown error");
+      return;
+    }
+    renderImportResultV2(data, "Appended");
+    await loadMetaV2();
+    await loadDataV2();
+  } catch (e) {
+    status.className = "err";
+    status.textContent = "Scan failed: " + e;
+  } finally {
+    qs("run-scan-btn-v2").disabled = false;
+  }
+});
+
+async function loadScanDatesV2() {
+  const res = await fetch("/api/v2/bhavcopy-dates");
+  const meta = await res.json();
+  const sel = qs("scan-date-select-v2");
+  if (!meta.dates || meta.dates.length === 0) {
+    sel.innerHTML = '<option value="">No bhavcopy data found</option>';
+    qs("run-scan-btn-v2").disabled = true;
+    return;
+  }
+  sel.innerHTML = meta.dates.map(d => `<option value="${d}">${d}${d === meta.latest ? " (latest)" : ""}</option>`).join("");
+  sel.value = meta.latest || meta.dates[0];
+}
+
+qs("apply-btn-v2").addEventListener("click", loadDataV2);
+qs("f-search-v2").addEventListener("keydown", e => { if (e.key === "Enter") loadDataV2(); });
+
+qs("reset-btn-v2").addEventListener("click", () => {
+  qs("f-date-from-v2").value = "";
+  qs("f-date-to-v2").value = "";
+  qs("f-sector-v2").value = "";
+  qs("f-status-v2").value = "";
+  qs("f-min-pillars-v2").value = "";
+  qs("f-entry-status-v2").value = "";
+  qs("f-suggestion-v2").value = "";
+  qs("f-search-v2").value = "";
+  loadDataV2();
+});
+
+qs("export-btn-v2").addEventListener("click", () => {
+  const params = currentFilterParamsV2();
+  window.location = "/api/v2/export?" + params.toString();
+});
+
+qs("clear-btn-v2").addEventListener("click", async () => {
+  if (!confirm("Delete ALL persisted Strategy 2 scan data? This cannot be undone.")) return;
+  await fetch("/api/v2/clear", { method: "POST" });
+  qs("exited-banner-v2").style.display = "none";
+  qs("import-status-v2").textContent = "";
+  await loadMetaV2();
+  await loadDataV2();
+});
+
+qs("reset-columns-btn-v2").addEventListener("click", () => {
+  COLUMNS_V2 = [...DEFAULT_COLUMNS_V2];
+  localStorage.removeItem(COLUMN_ORDER_STORAGE_KEY_V2);
+  renderTableV2();
+});
+
+qs("tab-btn-1").addEventListener("click", () => {
+  qs("tab-btn-1").classList.add("active");
+  qs("tab-btn-2").classList.remove("active");
+  qs("tab1-content").style.display = "";
+  qs("tab2-content").style.display = "none";
+});
+qs("tab-btn-2").addEventListener("click", () => {
+  qs("tab-btn-2").classList.add("active");
+  qs("tab-btn-1").classList.remove("active");
+  qs("tab2-content").style.display = "";
+  qs("tab1-content").style.display = "none";
+});
+
+(async function initV2() {
+  if (window.location.protocol === "file:") {
+    qs("file-protocol-warning-v2").style.display = "block";
+    qs("import-btn-v2").disabled = true;
+    qs("run-scan-btn-v2").disabled = true;
+    return;
+  }
+  loadColumnOrderV2();
+  await loadScanDatesV2();
+  await loadMetaV2();
+  await loadDataV2();
 })();
 </script>
 </body>
