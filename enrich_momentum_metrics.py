@@ -2,7 +2,7 @@
 """Momentum-scan enrichment for the NSE Nifty 500 universe.
 
 Consumes the output of nse_udiff_bhavcopy.py (a Market Data Date + list of
-traded symbols) and computes 6 metrics per Nifty 500 constituent:
+traded symbols) and computes, per Nifty 500 constituent:
 
   1. Lifetime ATH price       - Yahoo Finance, max High over full history
   2. 52-week return           - Yahoo Finance, (close_t - close_t-252) / close_t-252
@@ -11,6 +11,17 @@ traded symbols) and computes 6 metrics per Nifty 500 constituent:
   5. Sector-index 52-week return - Yahoo Finance sector index, same formula
   6. TTM PAT ATH               - Screener.in quarterly results, max rolling
                                   4-quarter sum of Net Profit
+  7. 50/200 SMA, 14-period RSI, 20-day volume ratio - Yahoo Finance, same
+                                  already-fetched OHLCV history as #1-3
+  8. Revenue growth YoY, ROCE  - Screener.in annual P&L / top-ratios panel,
+                                  same single page fetch as #6 (no extra
+                                  network calls)
+  9. ROCE industry median      - cross-sectional median of #8 across all
+                                  stocks in the same NSE Industry classification
+
+Metrics 7-9 feed the Momentum Score (Price Momentum + Fundamental Momentum +
+Relative Strength) computed by run_3pillar_scan.py - see that module's
+docstring for the scoring formula.
 
 Requires the .venv set up alongside this script (yfinance, pandas, lxml,
 requests):
@@ -82,6 +93,10 @@ class PriceMetrics:
     ath: float | None = None
     ema200: float | None = None
     return_52w: float | None = None
+    sma50: float | None = None
+    sma200: float | None = None
+    rsi14: float | None = None
+    volume_ratio_20d: float | None = None
     rows: int = 0
     error: str = ""
 
@@ -91,6 +106,8 @@ class TtmPatResult:
     ath: float | None = None
     latest: float | None = None  # most recent rolling 4-quarter TTM PAT (vs. ath = historical max)
     quarters_available: int = 0
+    revenue_growth_yoy_pct: float | None = None  # latest FY Sales vs prior FY, from the annual P&L view
+    roce_pct: float | None = None  # Screener.in top-ratios ROCE
     source_view: str = ""
     error: str = ""
     blocked: bool = False  # rate-limited / connection-refused, vs. a legitimate miss
@@ -133,6 +150,7 @@ class StockRecord:
     sector_return_52w: float | None = None
     nifty500_return_52w: float | None = None
     ttm_pat: TtmPatResult = field(default_factory=TtmPatResult)
+    roce_industry_median_pct: float | None = None
 
     def __post_init__(self):
         self.yahoo_ticker = f"{self.symbol}.NS"
@@ -209,14 +227,42 @@ def build_universe(bhavcopy_rows: list[dict], nifty500_rows: list[dict]) -> tupl
 # Yahoo Finance: ATH / EMA200 / 52-week return (stocks + benchmark + sectors)
 # --------------------------------------------------------------------------
 
-def compute_price_metrics(close: pd.Series, high: pd.Series) -> PriceMetrics:
+def _rsi_14(close: pd.Series) -> float | None:
+    """Standard Wilder's 14-period RSI on daily close."""
+    if len(close) < 15:
+        return None
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    last_gain, last_loss = avg_gain.iloc[-1], avg_loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
+        return None
+    if last_loss == 0:
+        return 100.0
+    rs = last_gain / last_loss
+    return float(100 - (100 / (1 + rs)))
+
+
+def compute_price_metrics(close: pd.Series, high: pd.Series, volume: pd.Series) -> PriceMetrics:
     close = close.dropna()
     high = high.dropna()
+    volume = volume.dropna()
     if close.empty:
         return PriceMetrics(error="no price history")
 
     ath = float(high.max()) if not high.empty else None
     ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
+    sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
+    sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    rsi14 = _rsi_14(close)
+
+    volume_ratio_20d = None
+    if len(volume) >= 21:
+        prior_20d_avg = volume.iloc[-21:-1].mean()
+        if prior_20d_avg:
+            volume_ratio_20d = float(volume.iloc[-1] / prior_20d_avg)
 
     return_52w = None
     if len(close) > TRADING_DAYS_52W:
@@ -224,7 +270,11 @@ def compute_price_metrics(close: pd.Series, high: pd.Series) -> PriceMetrics:
         if base:
             return_52w = float((close.iloc[-1] - base) / base)
 
-    return PriceMetrics(ath=ath, ema200=ema200, return_52w=return_52w, rows=len(close))
+    return PriceMetrics(
+        ath=ath, ema200=ema200, return_52w=return_52w,
+        sma50=sma50, sma200=sma200, rsi14=rsi14, volume_ratio_20d=volume_ratio_20d,
+        rows=len(close),
+    )
 
 
 def fetch_all_price_metrics(tickers: list[str], timeout: int) -> dict[str, PriceMetrics]:
@@ -249,7 +299,7 @@ def fetch_all_price_metrics(tickers: list[str], timeout: int) -> dict[str, Price
                     sub = data
                 else:
                     sub = data[t]
-                results[t] = compute_price_metrics(sub["Close"], sub["High"])
+                results[t] = compute_price_metrics(sub["Close"], sub["High"], sub["Volume"])
             except Exception as e:
                 results[t] = PriceMetrics(error=f"no data returned: {e}")
     return results
@@ -300,41 +350,82 @@ def _fetch_html_with_retry(url: str, timeout: int, max_retries: int) -> tuple[st
             return None, TtmPatResult(error=f"network error: {reason}", blocked=True)
 
 
+def _extract_roce(html: str) -> float | None:
+    """Screener.in's top-ratios panel (same fixed-format section used for
+    Market Cap etc.) - ROCE is always a current single value, not a
+    historical table."""
+    start = html.find('id="top-ratios"')
+    if start == -1:
+        return None
+    section = html[start:start + 3000]
+    m = re.search(r'ROCE.*?<span class="number">([\d,.\-]+)</span>', section, re.S)
+    return _clean_number(m.group(1)) if m else None
+
+
+def _row_values(table: pd.DataFrame, label_col: str, prefix: str, data_cols: list[str]) -> list[float]:
+    labels = table[label_col].astype(str).str.replace("\xa0", " ").str.strip()
+    match = labels.str.startswith(prefix)
+    if not match.any():
+        return []
+    row = table.loc[match, data_cols].iloc[0]
+    return [v for v in (_clean_number(str(x)) for x in row.tolist()) if v is not None]
+
+
 def _extract_net_profit_ttm(html: str, view: str) -> TtmPatResult | None:
     """Returns a TtmPatResult on success, or None if this view has no usable
-    quarterly Net Profit table (caller should fall back to the next view)."""
-    quarter_col_re = re.compile(r"^[A-Za-z]{3} \d{4}$")
+    financial tables at all (caller should fall back to the next view).
+    Parses both the quarterly table (TTM PAT ATH/latest, as before) and the
+    annual table (revenue growth YoY) from the same single page fetch, plus
+    ROCE from the top-ratios panel."""
+    date_col_re = re.compile(r"^[A-Za-z]{3} \d{4}$")
     try:
         tables = pd.read_html(io.StringIO(html))
     except ValueError:
         return None
 
+    found_any = False
+    ath = latest = None
+    quarters_available = 0
+    revenue_growth_yoy_pct = None
+
     for table in tables:
         cols = [str(c) for c in table.columns]
-        quarter_cols = [c for c in cols if quarter_col_re.match(c)]
-        if len(quarter_cols) < 4:
+        if not cols:
             continue
         label_col = cols[0]
-        labels = table[label_col].astype(str).str.replace("\xa0", " ").str.strip()
-        match = labels.str.startswith("Net Profit")
-        if not match.any():
-            continue
-        row = table.loc[match, quarter_cols].iloc[0]
-        values = [_clean_number(str(v)) for v in row.tolist()]
-        values = [v for v in values if v is not None]
-        if len(values) < 4:
+        date_cols = [c for c in cols if date_col_re.match(c)]
+        if not date_cols:
             continue
 
-        # Quarter columns run oldest -> newest, so the last rolling window is
-        # the most recent (current) TTM figure.
-        rolling_sums = [sum(values[i:i + 4]) for i in range(len(values) - 3)]
-        return TtmPatResult(
-            ath=max(rolling_sums),
-            latest=rolling_sums[-1],
-            quarters_available=len(values),
-            source_view=view,
-        )
-    return None
+        months = {c.split()[0] for c in date_cols}
+        is_annual = len(months) == 1  # annual columns are all "Mar YYYY"
+
+        if not is_annual:
+            values = _row_values(table, label_col, "Net Profit", date_cols)
+            if len(values) >= 4:
+                # Quarter columns run oldest -> newest, so the last rolling
+                # window is the most recent (current) TTM figure.
+                rolling_sums = [sum(values[i:i + 4]) for i in range(len(values) - 3)]
+                ath, latest = max(rolling_sums), rolling_sums[-1]
+                quarters_available = len(values)
+                found_any = True
+        else:
+            sales_vals = _row_values(table, label_col, "Sales", date_cols)
+            if len(sales_vals) >= 2 and sales_vals[-2]:
+                revenue_growth_yoy_pct = (sales_vals[-1] - sales_vals[-2]) / abs(sales_vals[-2]) * 100
+                found_any = True
+
+    roce_pct = _extract_roce(html)
+    if roce_pct is not None:
+        found_any = True
+
+    if not found_any:
+        return None
+    return TtmPatResult(
+        ath=ath, latest=latest, quarters_available=quarters_available,
+        revenue_growth_yoy_pct=revenue_growth_yoy_pct, roce_pct=roce_pct,
+        source_view=view,
+    )
 
 
 def fetch_quarterly_net_profit(symbol: str, timeout: int, max_retries: int = SCREENER_MAX_RETRIES) -> TtmPatResult:
@@ -351,11 +442,31 @@ def fetch_quarterly_net_profit(symbol: str, timeout: int, max_retries: int = SCR
         result = _extract_net_profit_ttm(html, view)
         if result is not None:
             return result
-        # This view rendered but had no usable quarterly Net Profit table
+        # This view rendered but had no usable financial tables at all
         # (e.g. a company with no real consolidated financials shows an
         # empty consolidated page) - fall through and try the next view.
 
-    return TtmPatResult(error="Net Profit row not found in consolidated or standalone view")
+    return TtmPatResult(error="No usable financial tables found in consolidated or standalone view")
+
+
+def compute_industry_median_roce(records: list[StockRecord]) -> None:
+    """Cross-sectional pass over the already-fetched ROCE values, grouped by
+    the same NSE Industry classification used for sector returns - sets
+    roce_industry_median_pct on every record with at least 2 ROCE values
+    available in its industry (a lone stock has no peer group to compare
+    against)."""
+    by_industry: dict[str, list[float]] = {}
+    for rec in records:
+        if rec.ttm_pat.roce_pct is not None:
+            by_industry.setdefault(rec.industry, []).append(rec.ttm_pat.roce_pct)
+
+    medians = {
+        industry: float(pd.Series(values).median())
+        for industry, values in by_industry.items()
+        if len(values) >= 2
+    }
+    for rec in records:
+        rec.roce_industry_median_pct = medians.get(rec.industry)
 
 
 def enrich_ttm_pat(records: list[StockRecord], workers: int, delay: float, timeout: int) -> None:
@@ -460,6 +571,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"  {ttm_ok}/{len(records)} stocks OK")
     print()
 
+    compute_industry_median_roce(records)
+
     enriched_dir = output_dir / "bhavcopy" / market_date / "enriched"
     enriched_dir.mkdir(parents=True, exist_ok=True)
     csv_path = enriched_dir / "momentum_metrics.csv"
@@ -467,9 +580,11 @@ def run(args: argparse.Namespace) -> int:
 
     fieldnames = [
         "symbol", "company_name", "industry", "market_data_date", "close_price",
-        "lifetime_ath_price", "return_52w_pct", "ema_200",
+        "lifetime_ath_price", "return_52w_pct", "ema_200", "sma_50", "sma_200",
+        "rsi_14", "volume_ratio_20d",
         "nifty500_return_52w_pct", "sector_index_ticker", "sector_return_52w_pct",
         "ttm_pat_ath_cr", "ttm_pat_latest_cr", "ttm_pat_ath_quarters_available",
+        "revenue_growth_yoy_pct", "roce_pct", "roce_industry_median_pct",
         "ttm_pat_source_view", "notes",
     ]
     json_rows = []
@@ -487,12 +602,19 @@ def run(args: argparse.Namespace) -> int:
                 "lifetime_ath_price": rec.price.ath,
                 "return_52w_pct": round(rec.price.return_52w * 100, 4) if rec.price.return_52w is not None else None,
                 "ema_200": round(rec.price.ema200, 4) if rec.price.ema200 is not None else None,
+                "sma_50": round(rec.price.sma50, 4) if rec.price.sma50 is not None else None,
+                "sma_200": round(rec.price.sma200, 4) if rec.price.sma200 is not None else None,
+                "rsi_14": round(rec.price.rsi14, 2) if rec.price.rsi14 is not None else None,
+                "volume_ratio_20d": round(rec.price.volume_ratio_20d, 3) if rec.price.volume_ratio_20d is not None else None,
                 "nifty500_return_52w_pct": round(rec.nifty500_return_52w * 100, 4) if rec.nifty500_return_52w is not None else None,
                 "sector_index_ticker": rec.sector_ticker or None,
                 "sector_return_52w_pct": round(rec.sector_return_52w * 100, 4) if rec.sector_return_52w is not None else None,
                 "ttm_pat_ath_cr": rec.ttm_pat.ath,
                 "ttm_pat_latest_cr": rec.ttm_pat.latest,
                 "ttm_pat_ath_quarters_available": rec.ttm_pat.quarters_available or None,
+                "revenue_growth_yoy_pct": round(rec.ttm_pat.revenue_growth_yoy_pct, 2) if rec.ttm_pat.revenue_growth_yoy_pct is not None else None,
+                "roce_pct": rec.ttm_pat.roce_pct,
+                "roce_industry_median_pct": rec.roce_industry_median_pct,
                 "ttm_pat_source_view": rec.ttm_pat.source_view or None,
                 "notes": notes,
             }

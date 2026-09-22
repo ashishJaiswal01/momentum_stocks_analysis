@@ -16,8 +16,29 @@ the output entirely, regardless of whether it was tracked in a previous scan
 scan's rows - the web app's own "dropped out of the screen" banner is what
 surfaces that on import, not a Status value here).
 
+Also computes a 0-100 Momentum Score, independent of the pillar/status
+classification above, across the full scanned universe:
+
+  Price Momentum (40)       - within 2% of lifetime high (15), close > 50 DMA
+                               (8), close > 200 DMA (7), RSI 55-70 (5),
+                               volume > 1.5x 20-day average (5)
+  Fundamental Momentum (30) - latest TTM PAT at its own lifetime high (15),
+                               revenue growth > 15% YoY (8), ROCE above its
+                               industry median (7)
+  Relative Strength (30)    - RS = 0.6x(stock 52W return - Nifty 500 52W
+                               return) + 0.4x(stock 52W return - sector 52W
+                               return), then converted to points by RS's
+                               percentile rank across this scan's full
+                               universe: top 10% -> 30, 80-90% -> 24,
+                               70-80% -> 18, 60-70% -> 12, below 60% -> 0
+
+The score is written for every stock that makes the SUPER_PERFORMER/
+PERFORMER cut (Momentum_Score column) - the web app computes and freezes
+Momentum_Score_Last (the score before this update) at import time, the same
+way it already handles Previous_Closing_Price_INR.
+
 Output is a flat CSV (no arrow/transition notation) using the app's plain
-19-column scan schema plus one extra AI_Commentary column - Entry_Status,
+20-column scan schema plus one extra AI_Commentary column - Entry_Status,
 Gain_Loss_Pct, and Suggestion are left for the web app to compute at import
 time, exactly as for any other imported scan file, by comparing against its
 own import history.
@@ -61,8 +82,16 @@ OUTPUT_COLUMNS = [
     "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
     "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
     "Relative_Alpha_Pct", "Pillar_3_Outperformance_Status", "Pillars_Met_Count",
-    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "AI_Commentary",
+    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "Momentum_Score",
+    "AI_Commentary",
 ]
+
+RSI_MOMENTUM_LOW, RSI_MOMENTUM_HIGH = 55.0, 70.0
+VOLUME_RATIO_THRESHOLD = 1.5
+REVENUE_GROWTH_THRESHOLD_PCT = 15.0
+RS_PERCENTILE_BANDS = (  # (min percentile inclusive, points)
+    (90.0, 30), (80.0, 24), (70.0, 18), (60.0, 12), (0.0, 0),
+)
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 AI_COMMENTARY_SYSTEM_PROMPT = (
@@ -149,6 +178,90 @@ def compute_pillars(row: dict) -> PillarResult:
     )
 
 
+def compute_relative_strength_raw(row: dict) -> float | None:
+    """RS = 0.6x(stock return - Nifty 500 return) + 0.4x(stock return -
+    sector return). Falls back to the Nifty-500-only component when no
+    sector-index return is available for this stock (same leniency as
+    Pillar 3's own benchmark comparison)."""
+    stock_52w = _to_float(row.get("return_52w_pct"))
+    nifty_52w = _to_float(row.get("nifty500_return_52w_pct"))
+    sector_52w = _to_float(row.get("sector_return_52w_pct"))
+    if stock_52w is None or nifty_52w is None:
+        return None
+    rs_nifty = stock_52w - nifty_52w
+    if sector_52w is None:
+        return rs_nifty
+    rs_sector = stock_52w - sector_52w
+    return 0.6 * rs_nifty + 0.4 * rs_sector
+
+
+def compute_rs_percentiles(rs_by_ticker: dict[str, float]) -> dict[str, float]:
+    """Percentile rank (0-100) of each ticker's RS value within the given
+    set - 100 is the single highest RS, ~0 the lowest."""
+    ranked = sorted(rs_by_ticker.items(), key=lambda kv: kv[1])
+    n = len(ranked)
+    return {ticker: (i + 1) / n * 100 for i, (ticker, _) in enumerate(ranked)}
+
+
+def _rs_percentile_points(percentile: float | None) -> int:
+    if percentile is None:
+        return 0
+    for min_pctile, points in RS_PERCENTILE_BANDS:
+        if percentile >= min_pctile:
+            return points
+    return 0
+
+
+@dataclass
+class MomentumScoreResult:
+    price_momentum: int
+    fundamental_momentum: int
+    relative_strength: int
+
+    @property
+    def total(self) -> int:
+        return self.price_momentum + self.fundamental_momentum + self.relative_strength
+
+
+def compute_momentum_score(row: dict, pr: PillarResult, rs_percentile: float | None) -> MomentumScoreResult:
+    close = _to_float(row.get("close_price"))
+    sma50 = _to_float(row.get("sma_50"))
+    sma200 = _to_float(row.get("sma_200"))
+    rsi14 = _to_float(row.get("rsi_14"))
+    volume_ratio = _to_float(row.get("volume_ratio_20d"))
+    revenue_growth = _to_float(row.get("revenue_growth_yoy_pct"))
+    roce = _to_float(row.get("roce_pct"))
+    roce_industry_median = _to_float(row.get("roce_industry_median_pct"))
+
+    price_momentum = 0
+    if pr.pillar1 == "PASS":
+        price_momentum += 15
+    if close is not None and sma50 is not None and close > sma50:
+        price_momentum += 8
+    if close is not None and sma200 is not None and close > sma200:
+        price_momentum += 7
+    if rsi14 is not None and RSI_MOMENTUM_LOW <= rsi14 <= RSI_MOMENTUM_HIGH:
+        price_momentum += 5
+    if volume_ratio is not None and volume_ratio > VOLUME_RATIO_THRESHOLD:
+        price_momentum += 5
+
+    fundamental_momentum = 0
+    if pr.pillar2 == "PASS":
+        fundamental_momentum += 15
+    if revenue_growth is not None and revenue_growth > REVENUE_GROWTH_THRESHOLD_PCT:
+        fundamental_momentum += 8
+    if roce is not None and roce_industry_median is not None and roce > roce_industry_median:
+        fundamental_momentum += 7
+
+    relative_strength = _rs_percentile_points(rs_percentile)
+
+    return MomentumScoreResult(
+        price_momentum=price_momentum,
+        fundamental_momentum=fundamental_momentum,
+        relative_strength=relative_strength,
+    )
+
+
 class ScanInputError(Exception):
     """Raised when the inputs needed to run a scan aren't available."""
 
@@ -218,6 +331,19 @@ def generate_ai_commentary(rows: list[dict]) -> tuple[int, int]:
 def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = False) -> dict:
     rows = load_enriched_rows(output_dir, market_date)
 
+    # Relative Strength percentile is cross-sectional - it needs every
+    # stock's RS value up front, computed once over the full universe,
+    # before any pillar filtering below.
+    rs_by_ticker = {}
+    for row in rows:
+        ticker = (row.get("symbol") or "").strip().upper()
+        if not ticker:
+            continue
+        rs = compute_relative_strength_raw(row)
+        if rs is not None:
+            rs_by_ticker[ticker] = rs
+    rs_percentiles = compute_rs_percentiles(rs_by_ticker)
+
     out_rows = []
     super_performer = performer = excluded = 0
 
@@ -226,6 +352,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         if not ticker:
             continue
         pr = compute_pillars(row)
+        score = compute_momentum_score(row, pr, rs_percentiles.get(ticker))
 
         if pr.pillars_met >= 3:
             status = "SUPER_PERFORMER"
@@ -260,6 +387,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
             "Status": status,
             "Suggested_200_EMA_SL": _fmt(_to_float(row.get("ema_200"))),
             "Target_Allocation_Pct": _fmt_pct(pr.allocation_pct),
+            "Momentum_Score": str(score.total),
             "AI_Commentary": "",
         })
 

@@ -114,6 +114,33 @@ recommendations, so it can never override or contradict the deterministic
 math above. Pass `--skip-ai-commentary` for a faster run, or just leave
 `OPENAI_API_KEY` unset in `.env` — either way the column is simply blank.
 
+### Momentum Score
+
+Independent of the SUPER_PERFORMER/PERFORMER classification above, every
+scanned stock also gets a 0-100 `Momentum_Score`, computed across the full
+universe on each run:
+
+| Component | Weight | Conditions |
+|---|---|---|
+| **Price Momentum** | 40 | Within 2% of lifetime high (15) · Close > 50 DMA (8) · Close > 200 DMA (7) · RSI 55-70 (5) · Volume > 1.5× 20-day average (5) |
+| **Fundamental Momentum** | 30 | Latest TTM PAT at its own lifetime high (15) · Revenue growth > 15% YoY (8) · ROCE above its industry median (7) |
+| **Relative Strength** | 30 | `RS = 0.6×(stock 52W return − Nifty 500 52W return) + 0.4×(stock − sector)`, then converted to points by RS's percentile rank across this scan's full universe: top 10% → 30, 80-90% → 24, 70-80% → 18, 60-70% → 12, below 60% → 0 |
+
+The technical inputs (50/200-day SMA, 14-period RSI, 20-day volume ratio)
+come from the same already-fetched Yahoo Finance OHLCV history as the other
+metrics; revenue growth and ROCE come from the same single Screener.in page
+fetch as TTM PAT (no extra network calls); the industry-median ROCE is a
+cross-sectional median computed once per run, grouped by NSE Industry
+classification.
+
+The web UI shows this as two columns: **Momentum Score (Current)** (this
+scan's value, with a ▲/▼ arrow against the previous value) and **Momentum
+Score (Last)** — unlike Previous Price/Original Scan Date, this is a
+*rolling* previous value: on every re-scan, whatever Momentum Score a stock
+had gets carried into Momentum Score (Last) before being overwritten with
+the new one, so the arrow always reflects the most recent scan-over-scan
+change, not the change since the stock was first tracked.
+
 ## 3. Scan results data browser (web UI)
 
 ```bash
@@ -221,11 +248,13 @@ cd "/Users/ashish.jaiswal/Projects/Datadownload&Aggregate"
 *same* single Yahoo Finance price-history fetch and *same* single Screener.in
 page fetch already made per stock in Strategy 1's enrichment (no extra
 network calls, no extra rate-limit risk): EMA50/EMA200, rolling 52-week high,
-ATR14, 12-month-minus-1-month momentum, 90-day average daily traded value,
-Market Cap, TTM EPS, 3-year peak EPS and YoY growth, latest annual CFO and
-Net Profit, 3-year average ROE, and Debt-to-Equity - plus the same metrics
-for the Nifty 500 benchmark and each sector index (SMA50/SMA200 for the
-benchmark's own macro-regime check).
+lifetime ATH, 50/200-day SMA, 14-period RSI, 20-day volume ratio, ATR14,
+12-month-minus-1-month momentum, 90-day average daily traded value, Market
+Cap, TTM EPS, 3-year peak EPS and YoY growth, latest annual CFO and Net
+Profit, TTM PAT (latest and lifetime-high), revenue growth YoY, ROCE (plus
+industry-median ROCE), 3-year average ROE, and Debt-to-Equity - plus the same
+price metrics for the Nifty 500 benchmark and each sector index (SMA50/SMA200
+for the benchmark's own macro-regime check).
 
 **Screening** (`run_momentum_strategy2_scan.py`):
 
@@ -260,6 +289,13 @@ Note: since the app's schema/column names are shared for UI compatibility,
 **12M-1M momentum** (not plain 52-week return), and `Suggested_200_EMA_SL`
 holds the **ATR-based stop** described above - see the docstring in
 `run_momentum_strategy2_scan.py` for the full mapping.
+
+Strategy 2 also computes its own `Momentum_Score` (0-100), same weights and
+percentile bands as Strategy 1's (see [Momentum Score](#momentum-score)
+above), but from its own underlying data: true lifetime ATH and 50/200-day
+SMA (distinct from Pillar 1's 52-week-high-anchor and EMA50/EMA200 above),
+TTM PAT vs. its own lifetime high, revenue growth YoY, ROCE vs. industry
+median, and 12M-1M relative strength vs. the Nifty 500/sector.
 
 The web UI's **Momentum Strategy 2** tab is a complete clone of Strategy 1's
 UI (same filters, drag-to-reorder columns, export, one-row-per-ticker
@@ -297,3 +333,11 @@ strategy above.
   Screener.in page happens to be formatted (not every company publishes a
   "Return on Equity" compounded-growth table in the exact parsed shape) -
   this is a real, expected gap in Screener.in's free-tier data, not a bug.
+- **Momentum Score's Relative Strength percentile is scan-size-dependent** —
+  it's ranked against however many stocks that particular run scanned
+  (the full ~500-stock universe for a normal run, but far fewer if you pass
+  `--limit` while testing), so the same RS value can map to a different
+  point band across runs of different sizes. The industry-median ROCE
+  comparison is similarly skipped (treated as no data, 0 points) for any
+  NSE Industry with fewer than 2 stocks that have a usable ROCE value that
+  run.

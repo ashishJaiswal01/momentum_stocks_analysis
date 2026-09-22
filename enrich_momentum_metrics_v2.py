@@ -91,6 +91,11 @@ class PriceMetricsV2:
     ema50: float | None = None
     ema200: float | None = None
     high_52w: float | None = None
+    lifetime_ath: float | None = None
+    sma50: float | None = None
+    sma200: float | None = None
+    rsi14: float | None = None
+    volume_ratio_20d: float | None = None
     atr14: float | None = None
     momentum_12m1m: float | None = None
     adtv_90d_cr: float | None = None
@@ -116,6 +121,9 @@ class FundamentalMetrics:
     cfo_latest_annual_cr: float | None = None
     net_profit_latest_annual_cr: float | None = None
     ttm_pat_cr: float | None = None
+    ttm_pat_ath_cr: float | None = None  # historical max rolling 4-quarter Net Profit
+    revenue_growth_yoy_pct: float | None = None
+    roce_pct: float | None = None
     roe_3yr_avg_pct: float | None = None
     debt_to_equity: float | None = None
     source_view: str = ""
@@ -159,6 +167,7 @@ class StockRecord:
     sector_momentum_12m1m: float | None = None
     benchmark_momentum_12m1m: float | None = None
     fundamentals: FundamentalMetrics = field(default_factory=FundamentalMetrics)
+    roce_industry_median_pct: float | None = None
 
     def __post_init__(self):
         self.yahoo_ticker = f"{self.symbol}.NS"
@@ -254,6 +263,25 @@ def _momentum_12m_1m(close: pd.Series) -> float | None:
     return float((recent - base) / base)
 
 
+def _rsi_14(close: pd.Series) -> float | None:
+    """Standard Wilder's 14-period RSI on daily close - independent copy of
+    Strategy 1's same calc, kept duplicated on purpose (no cross-imports)."""
+    if len(close) < 15:
+        return None
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    last_gain, last_loss = avg_gain.iloc[-1], avg_loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
+        return None
+    if last_loss == 0:
+        return 100.0
+    rs = last_gain / last_loss
+    return float(100 - (100 / (1 + rs)))
+
+
 def compute_price_metrics_v2(close: pd.Series, high: pd.Series, low: pd.Series, volume: pd.Series) -> PriceMetricsV2:
     close = close.dropna()
     if close.empty:
@@ -265,8 +293,19 @@ def compute_price_metrics_v2(close: pd.Series, high: pd.Series, low: pd.Series, 
     ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
     ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
     high_52w = float(high.dropna().tail(TRADING_DAYS_YEAR).max()) if not high.dropna().empty else None
+    lifetime_ath = float(high.dropna().max()) if not high.dropna().empty else None
+    sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
+    sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    rsi14 = _rsi_14(close)
     atr14 = _atr14(high, low, close)
     momentum = _momentum_12m_1m(close)
+
+    volume_dropna = volume.dropna()
+    volume_ratio_20d = None
+    if len(volume_dropna) >= 21:
+        prior_20d_avg = volume_dropna.iloc[-21:-1].mean()
+        if prior_20d_avg:
+            volume_ratio_20d = float(volume_dropna.iloc[-1] / prior_20d_avg)
 
     adtv_90d_cr = None
     traded_value = (volume * close).dropna().tail(90)
@@ -275,7 +314,9 @@ def compute_price_metrics_v2(close: pd.Series, high: pd.Series, low: pd.Series, 
 
     return PriceMetricsV2(
         close=float(close.iloc[-1]), ema50=ema50, ema200=ema200, high_52w=high_52w,
-        atr14=atr14, momentum_12m1m=momentum, adtv_90d_cr=adtv_90d_cr, rows=len(close),
+        lifetime_ath=lifetime_ath, sma50=sma50, sma200=sma200, rsi14=rsi14,
+        volume_ratio_20d=volume_ratio_20d, atr14=atr14, momentum_12m1m=momentum,
+        adtv_90d_cr=adtv_90d_cr, rows=len(close),
     )
 
 
@@ -366,6 +407,15 @@ def _extract_market_cap(html: str) -> float | None:
     return _clean_number(m.group(1)) if m else None
 
 
+def _extract_roce(html: str) -> float | None:
+    start = html.find('id="top-ratios"')
+    if start == -1:
+        return None
+    section = html[start:start + 3000]
+    m = re.search(r'ROCE.*?<span class="number">([\d,.\-]+)</span>', section, re.S)
+    return _clean_number(m.group(1)) if m else None
+
+
 def _row_values(table: pd.DataFrame, label_col: str, prefix: str, data_cols: list[str]) -> list[float]:
     labels = table[label_col].astype(str).str.replace("\xa0", " ").str.strip()
     match = labels.str.startswith(prefix)
@@ -386,9 +436,10 @@ def _extract_fundamentals(html: str, view: str) -> FundamentalMetrics | None:
         return None
 
     found_any = False
-    ttm_pat_cr = ttm_eps = None
+    ttm_pat_cr = ttm_pat_ath_cr = ttm_eps = None
     eps_3yr_peak = eps_yoy_growth_pct = None
     cfo_latest = net_profit_latest = None
+    revenue_growth_yoy_pct = None
     roe_3yr = None
     debt_to_equity = None
 
@@ -406,7 +457,8 @@ def _extract_fundamentals(html: str, view: str) -> FundamentalMetrics | None:
             if not is_annual:
                 pat_vals = _row_values(table, label_col, "Net Profit", date_cols)
                 if len(pat_vals) >= 4:
-                    ttm_pat_cr = sum(pat_vals[-4:])
+                    rolling_sums = [sum(pat_vals[i:i + 4]) for i in range(len(pat_vals) - 3)]
+                    ttm_pat_ath_cr, ttm_pat_cr = max(rolling_sums), rolling_sums[-1]
                     found_any = True
                 eps_vals = _row_values(table, label_col, "EPS in Rs", date_cols)
                 if len(eps_vals) >= 4:
@@ -419,6 +471,10 @@ def _extract_fundamentals(html: str, view: str) -> FundamentalMetrics | None:
                     eps_3yr_peak = max(last_n)
                     if eps_vals[-2]:
                         eps_yoy_growth_pct = (eps_vals[-1] - eps_vals[-2]) / abs(eps_vals[-2]) * 100
+                    found_any = True
+                sales_vals = _row_values(table, label_col, "Sales", date_cols)
+                if len(sales_vals) >= 2 and sales_vals[-2]:
+                    revenue_growth_yoy_pct = (sales_vals[-1] - sales_vals[-2]) / abs(sales_vals[-2]) * 100
                     found_any = True
                 pat_vals = _row_values(table, label_col, "Net Profit", date_cols)
                 if pat_vals:
@@ -445,6 +501,10 @@ def _extract_fundamentals(html: str, view: str) -> FundamentalMetrics | None:
                 roe_3yr = _clean_number(str(table.loc[match, value_col].iloc[0]))
                 found_any = True
 
+    roce_pct = _extract_roce(html)
+    if roce_pct is not None:
+        found_any = True
+
     if not found_any:
         return None
 
@@ -452,7 +512,9 @@ def _extract_fundamentals(html: str, view: str) -> FundamentalMetrics | None:
         market_cap_cr=_extract_market_cap(html),
         ttm_eps=ttm_eps, eps_3yr_peak=eps_3yr_peak, eps_yoy_growth_pct=eps_yoy_growth_pct,
         cfo_latest_annual_cr=cfo_latest, net_profit_latest_annual_cr=net_profit_latest,
-        ttm_pat_cr=ttm_pat_cr, roe_3yr_avg_pct=roe_3yr, debt_to_equity=debt_to_equity,
+        ttm_pat_cr=ttm_pat_cr, ttm_pat_ath_cr=ttm_pat_ath_cr,
+        revenue_growth_yoy_pct=revenue_growth_yoy_pct, roce_pct=roce_pct,
+        roe_3yr_avg_pct=roe_3yr, debt_to_equity=debt_to_equity,
         source_view=view,
     )
 
@@ -503,6 +565,24 @@ def enrich_fundamentals(records: list[StockRecord], workers: int, delay: float, 
                       "skipping remaining requests", flush=True)
             if done % 25 == 0 or done == total:
                 print(f"  Screener.in fundamentals: {done}/{total} processed", flush=True)
+
+
+def compute_industry_median_roce(records: list[StockRecord]) -> None:
+    """Cross-sectional pass over the already-fetched ROCE values, grouped by
+    the same NSE Industry classification used for sector momentum -
+    independent copy of Strategy 1's same calc (no cross-imports)."""
+    by_industry: dict[str, list[float]] = {}
+    for rec in records:
+        if rec.fundamentals.roce_pct is not None:
+            by_industry.setdefault(rec.industry, []).append(rec.fundamentals.roce_pct)
+
+    medians = {
+        industry: float(pd.Series(values).median())
+        for industry, values in by_industry.items()
+        if len(values) >= 2
+    }
+    for rec in records:
+        rec.roce_industry_median_pct = medians.get(rec.industry)
 
 
 # --------------------------------------------------------------------------
@@ -578,6 +658,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"  {fund_ok}/{len(records)} stocks OK")
     print()
 
+    compute_industry_median_roce(records)
+
     enriched_dir = output_dir / "bhavcopy" / market_date / "enriched"
     enriched_dir.mkdir(parents=True, exist_ok=True)
     csv_path = enriched_dir / "momentum_metrics_v2.csv"
@@ -585,11 +667,13 @@ def run(args: argparse.Namespace) -> int:
 
     fieldnames = [
         "symbol", "company_name", "industry", "market_data_date", "close_price",
-        "ema_50", "ema_200", "high_52w", "atr_14", "momentum_12m1m_pct", "adtv_90d_cr",
+        "ema_50", "ema_200", "high_52w", "lifetime_ath", "sma_50", "sma_200",
+        "rsi_14", "volume_ratio_20d", "atr_14", "momentum_12m1m_pct", "adtv_90d_cr",
         "sector_index_ticker", "benchmark_momentum_12m1m_pct", "sector_momentum_12m1m_pct",
         "benchmark_price", "benchmark_sma50", "benchmark_sma200",
         "market_cap_cr", "ttm_eps", "eps_3yr_peak", "eps_yoy_growth_pct",
-        "cfo_latest_annual_cr", "net_profit_latest_annual_cr", "ttm_pat_cr",
+        "cfo_latest_annual_cr", "net_profit_latest_annual_cr", "ttm_pat_cr", "ttm_pat_ath_cr",
+        "revenue_growth_yoy_pct", "roce_pct", "roce_industry_median_pct",
         "roe_3yr_avg_pct", "debt_to_equity", "notes",
     ]
     json_rows = []
@@ -607,6 +691,11 @@ def run(args: argparse.Namespace) -> int:
                 "ema_50": round(rec.price.ema50, 4) if rec.price.ema50 is not None else None,
                 "ema_200": round(rec.price.ema200, 4) if rec.price.ema200 is not None else None,
                 "high_52w": round(rec.price.high_52w, 4) if rec.price.high_52w is not None else None,
+                "lifetime_ath": round(rec.price.lifetime_ath, 4) if rec.price.lifetime_ath is not None else None,
+                "sma_50": round(rec.price.sma50, 4) if rec.price.sma50 is not None else None,
+                "sma_200": round(rec.price.sma200, 4) if rec.price.sma200 is not None else None,
+                "rsi_14": round(rec.price.rsi14, 2) if rec.price.rsi14 is not None else None,
+                "volume_ratio_20d": round(rec.price.volume_ratio_20d, 3) if rec.price.volume_ratio_20d is not None else None,
                 "atr_14": round(rec.price.atr14, 4) if rec.price.atr14 is not None else None,
                 "momentum_12m1m_pct": round(rec.price.momentum_12m1m * 100, 4) if rec.price.momentum_12m1m is not None else None,
                 "adtv_90d_cr": round(rec.price.adtv_90d_cr, 4) if rec.price.adtv_90d_cr is not None else None,
@@ -623,6 +712,10 @@ def run(args: argparse.Namespace) -> int:
                 "cfo_latest_annual_cr": rec.fundamentals.cfo_latest_annual_cr,
                 "net_profit_latest_annual_cr": rec.fundamentals.net_profit_latest_annual_cr,
                 "ttm_pat_cr": rec.fundamentals.ttm_pat_cr,
+                "ttm_pat_ath_cr": rec.fundamentals.ttm_pat_ath_cr,
+                "revenue_growth_yoy_pct": round(rec.fundamentals.revenue_growth_yoy_pct, 2) if rec.fundamentals.revenue_growth_yoy_pct is not None else None,
+                "roce_pct": rec.fundamentals.roce_pct,
+                "roce_industry_median_pct": rec.roce_industry_median_pct,
                 "roe_3yr_avg_pct": rec.fundamentals.roe_3yr_avg_pct,
                 "debt_to_equity": round(rec.fundamentals.debt_to_equity, 4) if rec.fundamentals.debt_to_equity is not None else None,
                 "notes": notes,

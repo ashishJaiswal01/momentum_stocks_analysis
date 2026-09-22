@@ -38,7 +38,8 @@ COLUMNS = [
     "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
     "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
     "Relative_Alpha_Pct", "Pillar_3_Outperformance_Status", "Pillars_Met_Count",
-    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "AI_Commentary",
+    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "Momentum_Score",
+    "AI_Commentary",
 ]
 REQUIRED_COLUMNS = ("Scan_Date", "Ticker_Symbol")
 SELECT_COLS_SQL = ", ".join(f'"{c}"' for c in COLUMNS)
@@ -48,14 +49,18 @@ SELECT_COLS_SQL = ", ".join(f'"{c}"' for c in COLUMNS)
 # previously exported file). Previous_Closing_Price_INR and Original_Scan_Date
 # are frozen at a ticker's very first import and never overwritten by any
 # later scan; Entry_Status and Gain_Loss_Pct are (re)computed against that
-# same frozen first-ever record on every import.
-DERIVED_COLUMNS = ["Entry_Status", "Previous_Closing_Price_INR", "Original_Scan_Date", "Gain_Loss_Pct", "Suggestion"]
+# same frozen first-ever record on every import. Momentum_Score_Last is
+# different: it's a *rolling* previous value, captured from whatever
+# Momentum_Score was immediately before this update (not frozen at first
+# import) - see import_csv_text()/import_csv_text_v2().
+DERIVED_COLUMNS = ["Entry_Status", "Previous_Closing_Price_INR", "Original_Scan_Date", "Gain_Loss_Pct", "Suggestion", "Momentum_Score_Last"]
 
 # Display/export order: identity + entry/gain-loss/suggestion up front, then
 # the rest of the existing scan columns in their original order.
 DISPLAY_COLUMNS = [
     "Ticker_Symbol", "Company_Name", "Entry_Status", "Closing_Price_INR",
     "Previous_Closing_Price_INR", "Gain_Loss_Pct", "Suggestion",
+    "Momentum_Score", "Momentum_Score_Last",
     "Scan_Date", "Original_Scan_Date", "Sector_Index", "Lifetime_ATH_Price", "Dist_From_ATH_Pct",
     "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
     "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
@@ -239,10 +244,12 @@ def get_existing_row(conn: sqlite3.Connection, ticker: str) -> sqlite3.Row | Non
     """The one row already persisted for this ticker, if any - one row per
     ticker, updated in place on every re-scan. Original_Scan_Date/
     Previous_Closing_Price_INR on it are frozen from the ticker's first-ever
-    scan and carried forward untouched on every update."""
+    scan and carried forward untouched on every update. Momentum_Score is
+    read here too so the caller can roll it into Momentum_Score_Last before
+    this row's Momentum_Score itself gets overwritten."""
     return conn.execute(
-        'SELECT "Closing_Price_INR", "Scan_Date", "Original_Scan_Date", "Previous_Closing_Price_INR" '
-        'FROM scan_results WHERE "Ticker_Symbol" = ?',
+        'SELECT "Closing_Price_INR", "Scan_Date", "Original_Scan_Date", "Previous_Closing_Price_INR", '
+        '"Momentum_Score" FROM scan_results WHERE "Ticker_Symbol" = ?',
         (ticker,),
     ).fetchone()
 
@@ -448,10 +455,12 @@ def import_csv_text(text: str) -> dict:
             params["Original_Scan_Date"] = existing_row["Original_Scan_Date"] or existing_row["Scan_Date"] or scan_date
             params["Previous_Closing_Price_INR"] = existing_row["Previous_Closing_Price_INR"] or existing_row["Closing_Price_INR"] or ""
             params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], params["Previous_Closing_Price_INR"])
+            params["Momentum_Score_Last"] = existing_row["Momentum_Score"] or ""
         else:
             params["Original_Scan_Date"] = scan_date
             params["Previous_Closing_Price_INR"] = ""
             params["Gain_Loss_Pct"] = "N/A"
+            params["Momentum_Score_Last"] = ""
 
         if params["Entry_Status"] == "New Entrant":
             new_entrant_count += 1
@@ -755,10 +764,12 @@ def get_existing_row_v2(conn: sqlite3.Connection, ticker: str) -> sqlite3.Row | 
     """Strategy 2 keeps one row per ticker (unlike Strategy 1's append-only
     history) - this is that row, if the ticker has been scanned before.
     Original_Scan_Date/Previous_Closing_Price_INR on it are frozen from the
-    ticker's first-ever scan and carried forward untouched on every update."""
+    ticker's first-ever scan and carried forward untouched on every update.
+    Momentum_Score is read here too so the caller can roll it into
+    Momentum_Score_Last before this row's Momentum_Score gets overwritten."""
     return conn.execute(
-        'SELECT "Closing_Price_INR", "Scan_Date", "Original_Scan_Date", "Previous_Closing_Price_INR" '
-        'FROM scan_results_v2 WHERE "Ticker_Symbol" = ?',
+        'SELECT "Closing_Price_INR", "Scan_Date", "Original_Scan_Date", "Previous_Closing_Price_INR", '
+        '"Momentum_Score" FROM scan_results_v2 WHERE "Ticker_Symbol" = ?',
         (ticker,),
     ).fetchone()
 
@@ -855,10 +866,12 @@ def import_csv_text_v2(text: str) -> dict:
             params["Original_Scan_Date"] = existing_row["Original_Scan_Date"] or existing_row["Scan_Date"] or scan_date
             params["Previous_Closing_Price_INR"] = existing_row["Previous_Closing_Price_INR"] or existing_row["Closing_Price_INR"] or ""
             params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], params["Previous_Closing_Price_INR"])
+            params["Momentum_Score_Last"] = existing_row["Momentum_Score"] or ""
         else:
             params["Original_Scan_Date"] = scan_date
             params["Previous_Closing_Price_INR"] = ""
             params["Gain_Loss_Pct"] = "N/A"
+            params["Momentum_Score_Last"] = ""
 
         if params["Entry_Status"] == "New Entrant":
             new_entrant_count += 1

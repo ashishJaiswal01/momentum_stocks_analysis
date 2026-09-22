@@ -423,6 +423,7 @@
 const DEFAULT_COLUMNS = [
   "Ticker_Symbol","Company_Name","Entry_Status","Closing_Price_INR",
   "Previous_Closing_Price_INR","Gain_Loss_Pct","Suggestion",
+  "Momentum_Score","Momentum_Score_Last",
   "Scan_Date","Original_Scan_Date","Sector_Index","Lifetime_ATH_Price","Dist_From_ATH_Pct",
   "Pillar_1_ATH_Price_Status","Latest_TTM_PAT_Cr","Pillar_2_ATH_PAT_Status",
   "Stock_52W_Return_Pct","Nifty500_52W_Return_Pct","Sector_52W_Return_Pct",
@@ -454,6 +455,8 @@ const COLUMN_LABELS = {
   Entry_Status: "Entry Status",
   Original_Scan_Date: "Original Scan Date",
   AI_Commentary: "AI Commentary",
+  Momentum_Score: "Momentum Score (Current)",
+  Momentum_Score_Last: "Momentum Score (Last)",
 };
 
 let currentRows = [];
@@ -522,12 +525,24 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
-function renderCell(col, value, marked = false) {
+function renderCell(col, value, marked = false, momentumScoreLast = null) {
   const v = value ?? "";
   if (col === "Ticker_Symbol") {
     return marked
       ? `${escapeHtml(v)}<span class="cross-super-marker" title="SUPER_PERFORMER in both Strategy 1 and Strategy 2">*</span>`
       : escapeHtml(v);
+  }
+  if (col === "Momentum_Score") {
+    if (v === "") return `<span style="color:var(--muted)">—</span>`;
+    const current = parseFloat(v);
+    const last = momentumScoreLast === "" || momentumScoreLast === null ? null : parseFloat(momentumScoreLast);
+    let arrow = "";
+    if (last !== null && !isNaN(current) && !isNaN(last)) {
+      if (current > last) arrow = `<span class="pos">&#9650;</span>`;
+      else if (current < last) arrow = `<span class="neg">&#9660;</span>`;
+      else arrow = `<span style="color:var(--muted)">&#8212;</span>`;
+    }
+    return `${escapeHtml(v)} ${arrow}`;
   }
   if (col === "AI_Commentary") {
     if (!v) return `<span style="color:var(--muted)">—</span>`;
@@ -647,7 +662,7 @@ function renderTable() {
   } else {
     const v2SuperTickers = new Set(currentRowsV2.filter(r => r.Ticker_Symbol && r.Status === "SUPER_PERFORMER").map(r => r.Ticker_Symbol));
     body.innerHTML = currentRows.map(r =>
-      "<tr>" + COLUMNS.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v2SuperTickers))}</td>`).join("") + "</tr>"
+      "<tr>" + COLUMNS.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v2SuperTickers), r.Momentum_Score_Last)}</td>`).join("") + "</tr>"
     ).join("");
   }
   qs("stat-showing").textContent = currentRows.length;
@@ -975,7 +990,7 @@ function renderTableV2() {
   } else {
     const v1SuperTickers = new Set(currentRows.filter(r => r.Ticker_Symbol && r.Status === "SUPER_PERFORMER").map(r => r.Ticker_Symbol));
     body.innerHTML = currentRowsV2.map(r =>
-      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v1SuperTickers))}</td>`).join("") + "</tr>"
+      "<tr>" + COLUMNS_V2.map(c => `<td>${renderCell(c, r[c], c === "Ticker_Symbol" && isCrossStrategySuperPerformer(r, v1SuperTickers), r.Momentum_Score_Last)}</td>`).join("") + "</tr>"
     ).join("");
   }
   qs("stat-showing-v2").textContent = currentRowsV2.length;

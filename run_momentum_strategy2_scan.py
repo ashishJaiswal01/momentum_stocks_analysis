@@ -37,7 +37,25 @@ Suggested allocation: equal-weight across this scan's Tier-1 names, clamped
 to 5%-7% per position (only populated for Tier-1 rows - Tier 2/3 aren't new
 entries so a sizing figure doesn't apply).
 
-Output is a flat CSV (no arrow/transition notation) using the same 19-column
+Also computes a 0-100 Momentum Score, independent of the pillar/tier
+classification above, across the full scanned universe - same weights and
+bands as Strategy 1's Momentum Score (see run_3pillar_scan.py's docstring),
+using this strategy's own underlying data instead:
+
+  Price Momentum (40)       - within 2% of true lifetime ATH (15, distinct
+                               from Pillar 1's 52-week-high anchor above),
+                               close > 50 DMA (8), close > 200 DMA (7),
+                               RSI 55-70 (5), volume > 1.5x 20-day average (5)
+  Fundamental Momentum (30) - latest TTM PAT at its own lifetime high (15,
+                               distinct from Pillar 2's EPS/cash-flow/ROE
+                               gate above), revenue growth > 15% YoY (8),
+                               ROCE above its industry median (7)
+  Relative Strength (30)    - RS = 0.6x(stock 12M-1M momentum - Nifty 500
+                               12M-1M momentum) + 0.4x(stock - sector), then
+                               percentile-ranked across this scan's full
+                               universe into points, same bands as Strategy 1
+
+Output is a flat CSV (no arrow/transition notation) using the same 20-column
 scan schema as Strategy 1 (column names repurposed for this strategy's own
 metrics - e.g. Lifetime_ATH_Price holds the rolling 52-week high here, not a
 lifetime high; see column comments below) - Entry_Status, Gain_Loss_Pct, and
@@ -84,8 +102,17 @@ OUTPUT_COLUMNS = [
     "Pillar_1_ATH_Price_Status", "Latest_TTM_PAT_Cr", "Pillar_2_ATH_PAT_Status",
     "Stock_52W_Return_Pct", "Nifty500_52W_Return_Pct", "Sector_52W_Return_Pct",
     "Relative_Alpha_Pct", "Pillar_3_Outperformance_Status", "Pillars_Met_Count",
-    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "AI_Commentary",
+    "Status", "Suggested_200_EMA_SL", "Target_Allocation_Pct", "Momentum_Score",
+    "AI_Commentary",
 ]
+
+RSI_MOMENTUM_LOW, RSI_MOMENTUM_HIGH = 55.0, 70.0
+VOLUME_RATIO_THRESHOLD = 1.5
+REVENUE_GROWTH_THRESHOLD_PCT = 15.0
+LIFETIME_ATH_THRESHOLD_PCT = -2.0
+RS_PERCENTILE_BANDS = (  # (min percentile inclusive, points) - independent
+    (90.0, 30), (80.0, 24), (70.0, 18), (60.0, 12), (0.0, 0),  # copy of Strategy 1's
+)
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 AI_COMMENTARY_SYSTEM_PROMPT = (
@@ -199,6 +226,91 @@ def evaluate_gates(row: dict) -> GateResult:
     )
 
 
+def compute_relative_strength_raw(row: dict) -> float | None:
+    """Independent copy of Strategy 1's same calc, using this strategy's own
+    12M-1M momentum fields instead of raw 52-week return (no cross-imports)."""
+    stock_mom = _to_float(row.get("momentum_12m1m_pct"))
+    benchmark_mom = _to_float(row.get("benchmark_momentum_12m1m_pct"))
+    sector_mom = _to_float(row.get("sector_momentum_12m1m_pct"))
+    if stock_mom is None or benchmark_mom is None:
+        return None
+    rs_nifty = stock_mom - benchmark_mom
+    if sector_mom is None:
+        return rs_nifty
+    rs_sector = stock_mom - sector_mom
+    return 0.6 * rs_nifty + 0.4 * rs_sector
+
+
+def compute_rs_percentiles(rs_by_ticker: dict[str, float]) -> dict[str, float]:
+    ranked = sorted(rs_by_ticker.items(), key=lambda kv: kv[1])
+    n = len(ranked)
+    return {ticker: (i + 1) / n * 100 for i, (ticker, _) in enumerate(ranked)}
+
+
+def _rs_percentile_points(percentile: float | None) -> int:
+    if percentile is None:
+        return 0
+    for min_pctile, points in RS_PERCENTILE_BANDS:
+        if percentile >= min_pctile:
+            return points
+    return 0
+
+
+@dataclass
+class MomentumScoreResult:
+    price_momentum: int
+    fundamental_momentum: int
+    relative_strength: int
+
+    @property
+    def total(self) -> int:
+        return self.price_momentum + self.fundamental_momentum + self.relative_strength
+
+
+def compute_momentum_score(row: dict, rs_percentile: float | None) -> MomentumScoreResult:
+    close = _to_float(row.get("close_price"))
+    lifetime_ath = _to_float(row.get("lifetime_ath"))
+    sma50 = _to_float(row.get("sma_50"))
+    sma200 = _to_float(row.get("sma_200"))
+    rsi14 = _to_float(row.get("rsi_14"))
+    volume_ratio = _to_float(row.get("volume_ratio_20d"))
+    ttm_pat_latest = _to_float(row.get("ttm_pat_cr"))
+    ttm_pat_ath = _to_float(row.get("ttm_pat_ath_cr"))
+    revenue_growth = _to_float(row.get("revenue_growth_yoy_pct"))
+    roce = _to_float(row.get("roce_pct"))
+    roce_industry_median = _to_float(row.get("roce_industry_median_pct"))
+
+    price_momentum = 0
+    if close is not None and lifetime_ath:
+        dist_from_ath = (close - lifetime_ath) / lifetime_ath * 100
+        if dist_from_ath >= LIFETIME_ATH_THRESHOLD_PCT:
+            price_momentum += 15
+    if close is not None and sma50 is not None and close > sma50:
+        price_momentum += 8
+    if close is not None and sma200 is not None and close > sma200:
+        price_momentum += 7
+    if rsi14 is not None and RSI_MOMENTUM_LOW <= rsi14 <= RSI_MOMENTUM_HIGH:
+        price_momentum += 5
+    if volume_ratio is not None and volume_ratio > VOLUME_RATIO_THRESHOLD:
+        price_momentum += 5
+
+    fundamental_momentum = 0
+    if ttm_pat_latest is not None and ttm_pat_ath is not None and ttm_pat_latest >= ttm_pat_ath - 0.005:
+        fundamental_momentum += 15
+    if revenue_growth is not None and revenue_growth > REVENUE_GROWTH_THRESHOLD_PCT:
+        fundamental_momentum += 8
+    if roce is not None and roce_industry_median is not None and roce > roce_industry_median:
+        fundamental_momentum += 7
+
+    relative_strength = _rs_percentile_points(rs_percentile)
+
+    return MomentumScoreResult(
+        price_momentum=price_momentum,
+        fundamental_momentum=fundamental_momentum,
+        relative_strength=relative_strength,
+    )
+
+
 def load_enriched_rows(output_dir: Path, market_date: str) -> list[dict]:
     csv_path = output_dir / "bhavcopy" / market_date / "enriched" / "momentum_metrics_v2.csv"
     if not csv_path.exists():
@@ -270,7 +382,19 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         and benchmark_price > benchmark_sma200 and benchmark_sma50 >= benchmark_sma200
     )
 
-    candidates = []  # (row, ticker, gate, tier) - tier assigned before allocation sizing
+    # Relative Strength percentile is cross-sectional - computed once over
+    # the full universe before any gate/pillar filtering below.
+    rs_by_ticker = {}
+    for row in rows:
+        ticker = (row.get("symbol") or "").strip().upper()
+        if not ticker:
+            continue
+        rs = compute_relative_strength_raw(row)
+        if rs is not None:
+            rs_by_ticker[ticker] = rs
+    rs_percentiles = compute_rs_percentiles(rs_by_ticker)
+
+    candidates = []  # (row, ticker, gate, tier, score) - tier assigned before allocation sizing
     super_performer = performer = excluded = 0
 
     for row in rows:
@@ -278,6 +402,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         if not ticker:
             continue
         gate = evaluate_gates(row)
+        score = compute_momentum_score(row, rs_percentiles.get(ticker))
 
         if not gate.liquidity_pass:
             excluded += 1
@@ -295,7 +420,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         else:
             performer += 1
 
-        candidates.append((row, ticker, gate, tier))
+        candidates.append((row, ticker, gate, tier, score))
 
     tier1_count = super_performer
     target_holdings = min(tier1_count, TARGET_HOLDINGS_MAX) if tier1_count else 0
@@ -304,7 +429,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         allocation_pct = min(ALLOCATION_MAX_PCT, max(ALLOCATION_MIN_PCT, 100.0 / target_holdings))
 
     out_rows = []
-    for row, ticker, gate, tier in candidates:
+    for row, ticker, gate, tier, score in candidates:
         out_rows.append({
             "Scan_Date": market_date,
             "Ticker_Symbol": ticker,
@@ -325,6 +450,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
             "Status": tier,
             "Suggested_200_EMA_SL": _fmt(gate.stop_loss),  # NOTE: max(EMA50, close - 3*ATR14)
             "Target_Allocation_Pct": _fmt_pct(allocation_pct) if tier == "SUPER_PERFORMER" and allocation_pct else "",
+            "Momentum_Score": str(score.total),
             "AI_Commentary": "",
         })
 
