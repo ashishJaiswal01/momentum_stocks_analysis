@@ -128,7 +128,7 @@ way, and the page will show a warning if you try).
 **Run 3-Pillar Scan** (top of the page) lets you pick any date from
 `data/bhavcopy/` (dropdown, populated from folders that have enrichment
 output; latest pre-selected) and run the screening engine above directly from
-the UI — its output is appended into the store the same way a manual CSV
+the UI — its output is synced into the store the same way a manual CSV
 import would be, no separate upload step needed.
 
 Or import a 3-Pillar scan CSV manually (19 columns: `Scan_Date`,
@@ -142,33 +142,32 @@ example), then:
   in the browser (`localStorage`) and persists across reloads. "Reset Columns"
   restores the default order.
 - **Export** the currently filtered view back out as CSV.
-- **Persistence is append-only** — every import adds its rows to a local
-  SQLite store (`data/scan_results.db`) without touching existing rows, even
-  if a row's `Scan_Date`/`Ticker_Symbol` was already imported before. Re-importing
-  the same file twice results in two copies, distinguishable by the
-  `Imported At` timestamp column.
+- **One row per ticker** — persisted to a local SQLite store
+  (`data/scan_results.db`, unique on `Ticker_Symbol`). Importing a ticker
+  that's already tracked updates that one row in place (`Scan_Date` and all
+  scan-output columns move to the new values); a ticker seen for the first
+  time gets a new row. Re-importing the same file twice is a no-op the
+  second time (same values written again), not a duplicate.
 - **Clear All Data** wipes the store (confirmation required).
 
 ### Scan-over-scan comparison
 
-Each import is compared against every ticker's very *first* ever import (by
-import timestamp, not calendar date):
+Even though only one row per ticker is kept, each update is compared against
+that ticker's very *first* ever import:
 
 - **Entry Status** — `New Entrant` if the ticker has never been imported
   before, otherwise `Existing`.
 - **Original Scan Date** — the `Scan_Date` of that ticker's first-ever
   import. Frozen permanently the moment a ticker is first tracked; never
   overwritten by any later scan, no matter how many more come in. `Scan_Date`
-  itself always reflects the current row's own (latest) scan date.
+  itself always reflects the row's current (latest) scan date.
 - **Previous Price** / **Gain/Loss %** — the *first-ever* tracked
   `Closing_Price_INR` for that ticker (not the immediately-preceding scan)
   and the percent change since then (`N/A` for new entrants or an
   unparseable price). Like Original Scan Date, `Previous_Closing_Price_INR`
   is frozen at first-import time and never overwritten by any later scan —
   `Gain_Loss_Pct` is therefore cumulative return since a ticker was first
-  tracked, not scan-over-scan. These values are computed fresh at each
-  import time using whatever was true then, so historical rows stay
-  internally consistent as new scans arrive.
+  tracked, not scan-over-scan.
 - **Suggestion** (`ACCUMULATE` / `HOLD` / `EXIT`) — a rule-based read of the
   existing 3-Pillar fields only (`Pillars_Met_Count`, the individual
   Pillar 1/2/3 PASS/FAIL status, `Relative_Alpha_Pct`). **This app has no
@@ -180,8 +179,9 @@ import timestamp, not calendar date):
   met; `HOLD` otherwise. See `compute_suggestion()` in `webapp/app.py` for
   the exact rule.
 - **Stocks that drop out of the screen** (present in the previous import,
-  absent from the new one) aren't deleted — their historical rows remain —
-  but the UI shows a banner listing them right after import.
+  absent from the new one) aren't deleted — their row remains showing its
+  last scanned data, just not refreshed — but the UI shows a banner listing
+  them right after import.
 - Within a single imported file, duplicate tickers are deduplicated (last
   row wins) and ticker symbols are case/whitespace-normalized before any
   comparison.
@@ -262,8 +262,8 @@ holds the **ATR-based stop** described above - see the docstring in
 `run_momentum_strategy2_scan.py` for the full mapping.
 
 The web UI's **Momentum Strategy 2** tab is a complete clone of Strategy 1's
-UI (same filters, drag-to-reorder columns, export, append-only persistence,
-scan-over-scan comparison, AI commentary) pointed at its own `/api/v2/*`
+UI (same filters, drag-to-reorder columns, export, one-row-per-ticker
+persistence, scan-over-scan comparison, AI commentary) pointed at its own `/api/v2/*`
 endpoints and `data/scan_results_v2.db` - including its own date dropdown,
 "Run Strategy 2 Scan" button, and a description panel summarizing the
 strategy above.

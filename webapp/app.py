@@ -235,15 +235,14 @@ def compute_suggestion(params: dict) -> str:
     return "HOLD"
 
 
-def get_first_row(conn: sqlite3.Connection, ticker: str) -> sqlite3.Row | None:
-    """The very first row ever persisted for this ticker (earliest
-    imported_at) - its Closing_Price_INR and Scan_Date are frozen forever as
-    Previous_Closing_Price_INR and Original_Scan_Date on every later import,
-    never overwritten by a more recent scan."""
+def get_existing_row(conn: sqlite3.Connection, ticker: str) -> sqlite3.Row | None:
+    """The one row already persisted for this ticker, if any - one row per
+    ticker, updated in place on every re-scan. Original_Scan_Date/
+    Previous_Closing_Price_INR on it are frozen from the ticker's first-ever
+    scan and carried forward untouched on every update."""
     return conn.execute(
-        'SELECT "Closing_Price_INR", "Scan_Date" FROM scan_results '
-        'WHERE "Ticker_Symbol" = ? '
-        'ORDER BY imported_at ASC LIMIT 1',
+        'SELECT "Closing_Price_INR", "Scan_Date", "Original_Scan_Date", "Previous_Closing_Price_INR" '
+        'FROM scan_results WHERE "Ticker_Symbol" = ?',
         (ticker,),
     ).fetchone()
 
@@ -322,6 +321,41 @@ def init_db() -> None:
         if col not in existing_cols:
             conn.execute(f'ALTER TABLE scan_results ADD COLUMN "{col}" TEXT')
 
+    # One-time migration: Strategy 1 used to append a new row per scan, so
+    # re-running a scan or re-importing the same date piled up duplicate rows
+    # per ticker. It now keeps one row per ticker and updates it in place, so
+    # collapse any pre-existing duplicates down to one row each - keeping the
+    # most recently imported row's current-scan data, while freezing
+    # Original_Scan_Date/Previous_Closing_Price_INR from whichever duplicate
+    # was imported first (same "first-ever price" rule as before).
+    dupe_tickers = [r[0] for r in conn.execute(
+        'SELECT "Ticker_Symbol" FROM scan_results '
+        'WHERE "Ticker_Symbol" IS NOT NULL AND "Ticker_Symbol" != "" '
+        'GROUP BY "Ticker_Symbol" HAVING COUNT(*) > 1'
+    ).fetchall()]
+    for ticker in dupe_tickers:
+        rows = conn.execute(
+            'SELECT * FROM scan_results WHERE "Ticker_Symbol" = ? ORDER BY imported_at ASC',
+            (ticker,),
+        ).fetchall()
+        first, last = rows[0], rows[-1]
+        original_scan_date = first["Original_Scan_Date"] or first["Scan_Date"]
+        previous_price = first["Previous_Closing_Price_INR"] or first["Closing_Price_INR"] or ""
+        conn.execute(
+            'UPDATE scan_results SET "Original_Scan_Date" = ?, "Previous_Closing_Price_INR" = ?, '
+            '"Gain_Loss_Pct" = ?, "Entry_Status" = ? WHERE id = ?',
+            (
+                original_scan_date,
+                previous_price,
+                format_gain_loss(last["Closing_Price_INR"], previous_price),
+                "Existing",
+                last["id"],
+            ),
+        )
+        stale_ids = [r["id"] for r in rows if r["id"] != last["id"]]
+        conn.executemany('DELETE FROM scan_results WHERE id = ?', [(i,) for i in stale_ids])
+
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_results_ticker ON scan_results("Ticker_Symbol")')
     conn.commit()
     conn.close()
 
@@ -368,13 +402,14 @@ def import_csv_text(text: str) -> dict:
         deduped[ticker_norm] = row
 
     conn = get_db()
-    inserted = skipped = 0
+    inserted = updated = skipped = 0
     new_entrant_count = existing_count = 0
     unparsed_dates = 0
     now = datetime.now(timezone.utc).isoformat()
-    insert_columns = COLUMNS + DERIVED_COLUMNS
-    placeholders = ", ".join(f'"{c}"' for c in insert_columns)
-    values_ph = ", ".join(f":{c}" for c in insert_columns)
+    all_columns = COLUMNS + DERIVED_COLUMNS
+    insert_placeholders = ", ".join(f'"{c}"' for c in all_columns)
+    insert_values_ph = ", ".join(f":{c}" for c in all_columns)
+    update_set_sql = ", ".join(f'"{c}" = :{c}' for c in all_columns)
     imported_tickers = set()
 
     for ticker_norm, row in deduped.items():
@@ -401,18 +436,18 @@ def import_csv_text(text: str) -> dict:
         params["Ticker_Symbol"] = ticker_norm
         params["imported_at"] = now
 
-        first_row = get_first_row(conn, ticker_norm)
+        existing_row = get_existing_row(conn, ticker_norm)
 
         if entrant_status_col:
             params["Entry_Status"] = _normalize_entry_status(row.get(entrant_status_col) or "")
         else:
-            has_history = arrow_split is not None or first_row is not None
+            has_history = arrow_split is not None or existing_row is not None
             params["Entry_Status"] = "Existing" if has_history else "New Entrant"
 
-        if first_row is not None:
-            params["Original_Scan_Date"] = first_row["Scan_Date"] or scan_date
-            params["Previous_Closing_Price_INR"] = first_row["Closing_Price_INR"] or ""
-            params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], first_row["Closing_Price_INR"])
+        if existing_row is not None:
+            params["Original_Scan_Date"] = existing_row["Original_Scan_Date"] or existing_row["Scan_Date"] or scan_date
+            params["Previous_Closing_Price_INR"] = existing_row["Previous_Closing_Price_INR"] or existing_row["Closing_Price_INR"] or ""
+            params["Gain_Loss_Pct"] = format_gain_loss(params["Closing_Price_INR"], params["Previous_Closing_Price_INR"])
         else:
             params["Original_Scan_Date"] = scan_date
             params["Previous_Closing_Price_INR"] = ""
@@ -425,13 +460,19 @@ def import_csv_text(text: str) -> dict:
 
         params["Suggestion"] = compute_suggestion(params)
 
-        # Always append - never overwrite an existing row, even if this
-        # Scan_Date/Ticker_Symbol combo was already imported before.
-        conn.execute(f"""
-            INSERT INTO scan_results ({placeholders}, imported_at)
-            VALUES ({values_ph}, :imported_at)
-        """, params)
-        inserted += 1
+        if existing_row is not None:
+            conn.execute(
+                f'UPDATE scan_results SET {update_set_sql}, imported_at = :imported_at '
+                'WHERE "Ticker_Symbol" = :Ticker_Symbol',
+                params,
+            )
+            updated += 1
+        else:
+            conn.execute(f"""
+                INSERT INTO scan_results ({insert_placeholders}, imported_at)
+                VALUES ({insert_values_ph}, :imported_at)
+            """, params)
+            inserted += 1
         imported_tickers.add(ticker_norm)
 
     exited_tickers = sorted(get_previous_batch_tickers(conn, now) - imported_tickers)
@@ -442,6 +483,7 @@ def import_csv_text(text: str) -> dict:
 
     return {
         "inserted": inserted,
+        "updated": updated,
         "skipped": skipped,
         "duplicate_tickers_in_file": duplicate_tickers,
         "new_entrants": new_entrant_count,
