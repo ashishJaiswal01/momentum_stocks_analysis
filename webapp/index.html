@@ -203,7 +203,16 @@
 <header>
   <div>
     <h1>3-Pillar Momentum Scan — Data Browser</h1>
-    <div class="sub">Import scan CSVs, filter, and export. Data accumulates across imports in a local SQLite file.</div>
+    <div class="sub" style="max-width: 900px;">
+      A momentum screen across the Nifty 500 on three pillars: <strong>ATH Price</strong>
+      (within 2% of the stock's lifetime high), <strong>ATH PAT</strong> (latest TTM
+      profit at its own historical peak), and <strong>52-Week Outperformance</strong>
+      (trailing 52-week return beating both the Nifty 500 and its sector index). All 3
+      pillars met -> <strong>SUPER_PERFORMER</strong>; 2 of 3 -> <strong>PERFORMER</strong>;
+      1 or fewer and the stock is dropped from the scan entirely, regardless of prior
+      tracking. Import scan CSVs, filter, and export - data is synced into a local
+      SQLite store, one row per stock.
+    </div>
   </div>
   <div class="row">
     <select id="scan-date-select" title="Market data date to scan"></select>
