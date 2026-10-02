@@ -792,10 +792,12 @@ def api_weekly_leaderboard():
     week_ranked = _rank_weeks(week_rows, selected_weeks)
 
     # Tickers that made the top 20 in *every* week shown - starred in each
-    # week's cell, and also listed on their own in the last column.
+    # week's cell, and also listed on their own in the last column. Meaningless
+    # (and, as a self-intersection, trivially "everything") with only one week
+    # in view, so it's only ever non-empty with 2+ weeks selected.
     common_tickers = set.intersection(*(
         {ticker for ticker, _ in week_ranked.get(date, [])} for date in selected_weeks
-    )) if selected_weeks else set()
+    )) if len(selected_weeks) > 1 else set()
 
     rows = []
     for rank in range(1, WEEKLY_LEADERBOARD_TOP_N + 1):
