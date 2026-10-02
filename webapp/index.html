@@ -438,6 +438,8 @@
     <label for="weekly-end-date" style="color:var(--muted); font-size:13px;">Week ending on or before</label>
     <input type="date" id="weekly-end-date" />
     <button id="weekly-latest-btn" class="secondary">Latest</button>
+    <span style="width:1px; height:26px; background:var(--border); margin:0 4px;"></span>
+    <button id="weekly-export-btn" class="secondary" title="Download every week scanned so far, not just what's shown">Download All Weeks (CSV)</button>
   </div>
 </header>
 
@@ -1281,6 +1283,9 @@ qs("weekly-latest-btn").addEventListener("click", () => {
   loadWeeklyLeaderboard();
 });
 qs("weekly-end-date").addEventListener("change", () => loadWeeklyLeaderboard());
+qs("weekly-export-btn").addEventListener("click", () => {
+  window.location = "/api/weekly-leaderboard/export";
+});
 
 function showTab(n) {
   for (const i of [1, 2, 3]) {

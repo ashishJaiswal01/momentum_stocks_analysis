@@ -326,6 +326,12 @@ ending on or before"** date picker to look further back; it shows the 5 most
 recent weeks at or before whatever date you pick, and "Latest" jumps back to
 the most current data.
 
+**"Download All Weeks (CSV)"** exports every week scanned so far - not just
+the 5 shown on screen - as one flat CSV (`Week_Ending_Date, Rank,
+Ticker_Symbol, Company_Name, Momentum_Score, Closing_Price_INR,
+Gain_Loss_Pct`), one row per (week, rank), oldest week first. Same
+top-20-per-week ranking and gain/loss logic as the on-screen table.
+
 This reads directly from each week's `3pillar_scan.csv` on disk (one file
 per market date, auto-run on demand via the same scan engine as the "Run
 3-Pillar Scan" button if a date has enrichment but hasn't been scanned yet)

@@ -730,22 +730,12 @@ def _weekly_representative_dates(dates_desc: list[str]) -> list[str]:
     return representatives
 
 
-@app.route("/api/weekly-leaderboard")
-def api_weekly_leaderboard():
-    end_date = (request.args.get("end_date") or "").strip() or None
-
-    all_dates = _enriched_dates_v1()
-    all_weeks_desc = _weekly_representative_dates(all_dates)
-
-    week_dates_desc = all_weeks_desc
-    if end_date:
-        week_dates_desc = [d for d in all_weeks_desc if d <= end_date]
-
-    selected_weeks = list(reversed(week_dates_desc[:WEEKLY_LEADERBOARD_WEEK_COUNT]))  # oldest -> newest
-
-    data_dir = PROJECT_DIR / "data"
-    week_rows: dict[str, dict[str, dict]] = {}  # date -> {ticker: {company_name, price, score}}
-    for date in selected_weeks:
+def _load_week_rows(data_dir: Path, dates: list[str]) -> dict[str, dict[str, dict]]:
+    """date -> {ticker: {company_name, price, score}}, auto-running the scan
+    for any date that has enrichment but hasn't been scanned yet (same as the
+    "Run 3-Pillar Scan" button) so historical dates work on first request."""
+    week_rows: dict[str, dict[str, dict]] = {}
+    for date in dates:
         scan_csv = data_dir / "bhavcopy" / date / "enriched" / "3pillar_scan.csv"
         if not scan_csv.exists():
             try:
@@ -762,22 +752,44 @@ def api_weekly_leaderboard():
                 }
                 for row in csv.DictReader(f)
             }
+    return week_rows
+
+
+def _score_sort_key(item: tuple[str, dict]) -> float:
+    try:
+        return float(item[1]["score"])
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _rank_weeks(week_rows: dict[str, dict[str, dict]], dates: list[str]) -> dict[str, list[tuple[str, dict]]]:
+    """Each week gets its own top-20 by that week's own score - the stock at
+    rank N can be a different ticker in different weeks."""
+    return {
+        date: sorted(week_rows.get(date, {}).items(), key=_score_sort_key, reverse=True)[:WEEKLY_LEADERBOARD_TOP_N]
+        for date in dates
+    }
+
+
+@app.route("/api/weekly-leaderboard")
+def api_weekly_leaderboard():
+    end_date = (request.args.get("end_date") or "").strip() or None
+
+    all_dates = _enriched_dates_v1()
+    all_weeks_desc = _weekly_representative_dates(all_dates)
+
+    week_dates_desc = all_weeks_desc
+    if end_date:
+        week_dates_desc = [d for d in all_weeks_desc if d <= end_date]
+
+    selected_weeks = list(reversed(week_dates_desc[:WEEKLY_LEADERBOARD_WEEK_COUNT]))  # oldest -> newest
 
     if not selected_weeks:
         return jsonify({"weeks": [], "rows": [], "available_weeks": all_weeks_desc})
 
-    def _score_sort_key(item: tuple[str, dict]) -> float:
-        try:
-            return float(item[1]["score"])
-        except (TypeError, ValueError):
-            return float("-inf")
-
-    # Each week gets its own top-20 by that week's own score - the stock at
-    # rank N can be a different ticker in different weeks.
-    week_ranked: dict[str, list[tuple[str, dict]]] = {
-        date: sorted(week_rows.get(date, {}).items(), key=_score_sort_key, reverse=True)[:WEEKLY_LEADERBOARD_TOP_N]
-        for date in selected_weeks
-    }
+    data_dir = PROJECT_DIR / "data"
+    week_rows = _load_week_rows(data_dir, selected_weeks)
+    week_ranked = _rank_weeks(week_rows, selected_weeks)
 
     rows = []
     for rank in range(1, WEEKLY_LEADERBOARD_TOP_N + 1):
@@ -804,6 +816,41 @@ def api_weekly_leaderboard():
         rows.append({"rank": rank, "by_week": by_week})
 
     return jsonify({"weeks": selected_weeks, "rows": rows, "available_weeks": all_weeks_desc})
+
+
+@app.route("/api/weekly-leaderboard/export")
+def api_weekly_leaderboard_export():
+    """Every week scanned so far (not just the 5 shown on screen) - one flat
+    CSV row per (week, rank), same top-20-per-week ranking and gain/loss
+    logic as the on-screen table, just unbounded in how far back it goes."""
+    all_dates = _enriched_dates_v1()
+    all_weeks = list(reversed(_weekly_representative_dates(all_dates)))  # oldest -> newest
+
+    data_dir = PROJECT_DIR / "data"
+    week_rows = _load_week_rows(data_dir, all_weeks)
+    week_ranked = _rank_weeks(week_rows, all_weeks)
+
+    fieldnames = ["Week_Ending_Date", "Rank", "Ticker_Symbol", "Company_Name", "Momentum_Score", "Closing_Price_INR", "Gain_Loss_Pct"]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for i, date in enumerate(all_weeks):
+        ranked_this_week = week_ranked.get(date, [])
+        for rank, (ticker, info) in enumerate(ranked_this_week, start=1):
+            if i == 0:
+                gain_loss_pct = "N/A"
+            else:
+                prev_info = week_rows.get(all_weeks[i - 1], {}).get(ticker)
+                gain_loss_pct = format_gain_loss(info["price"], prev_info["price"] if prev_info else "")
+            writer.writerow({
+                "Week_Ending_Date": date, "Rank": rank, "Ticker_Symbol": ticker,
+                "Company_Name": info["company_name"], "Momentum_Score": info["score"],
+                "Closing_Price_INR": info["price"], "Gain_Loss_Pct": gain_loss_pct,
+            })
+
+    mem = io.BytesIO(buf.getvalue().encode("utf-8"))
+    filename = f"weekly_leaderboard_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return send_file(mem, mimetype="text/csv", as_attachment=True, download_name=filename)
 
 
 # ============================================================================
