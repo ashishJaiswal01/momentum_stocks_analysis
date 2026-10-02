@@ -50,10 +50,14 @@ using this strategy's own underlying data instead:
                                distinct from Pillar 2's EPS/cash-flow/ROE
                                gate above), revenue growth > 15% YoY (8),
                                ROCE above its industry median (7)
-  Relative Strength (30)    - RS = 0.6x(stock 12M-1M momentum - Nifty 500
-                               12M-1M momentum) + 0.4x(stock - sector), then
-                               percentile-ranked across this scan's full
-                               universe into points, same bands as Strategy 1
+  Relative Strength (30)    - 0 points unless the stock's 12M-1M momentum
+                               beats BOTH the Nifty 500 and its sector
+                               outright (same binary test as Pillar 3
+                               above). If it does, RS = 0.6x(stock 12M-1M
+                               momentum - Nifty 500 12M-1M momentum) +
+                               0.4x(stock - sector) is percentile-ranked
+                               across this scan's full universe into points,
+                               same bands as Strategy 1
 
 Output is a flat CSV (no arrow/transition notation) using the same 20-column
 scan schema as Strategy 1 (column names repurposed for this strategy's own
@@ -267,7 +271,7 @@ class MomentumScoreResult:
         return self.price_momentum + self.fundamental_momentum + self.relative_strength
 
 
-def compute_momentum_score(row: dict, rs_percentile: float | None) -> MomentumScoreResult:
+def compute_momentum_score(row: dict, gate: GateResult, rs_percentile: float | None) -> MomentumScoreResult:
     close = _to_float(row.get("close_price"))
     lifetime_ath = _to_float(row.get("lifetime_ath"))
     sma50 = _to_float(row.get("sma_50"))
@@ -302,7 +306,11 @@ def compute_momentum_score(row: dict, rs_percentile: float | None) -> MomentumSc
     if roce is not None and roce_industry_median is not None and roce > roce_industry_median:
         fundamental_momentum += 7
 
-    relative_strength = _rs_percentile_points(rs_percentile)
+    # Relative Strength only pays out when the stock also clears the
+    # stricter, binary Pillar 3 bar (beats BOTH the Nifty 500 and sector
+    # outright) - a high RS percentile alone isn't enough, since the 0.6/0.4
+    # blend can stay positive even when one side of that comparison fails.
+    relative_strength = _rs_percentile_points(rs_percentile) if gate.pillar3 == "PASS" else 0
 
     return MomentumScoreResult(
         price_momentum=price_momentum,
@@ -402,7 +410,7 @@ def run_scan(output_dir: Path, market_date: str, skip_ai_commentary: bool = Fals
         if not ticker:
             continue
         gate = evaluate_gates(row)
-        score = compute_momentum_score(row, rs_percentiles.get(ticker))
+        score = compute_momentum_score(row, gate, rs_percentiles.get(ticker))
 
         if not gate.liquidity_pass:
             excluded += 1

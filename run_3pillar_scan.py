@@ -25,12 +25,16 @@ classification above, across the full scanned universe:
   Fundamental Momentum (30) - latest TTM PAT at its own lifetime high (15),
                                revenue growth > 15% YoY (8), ROCE above its
                                industry median (7)
-  Relative Strength (30)    - RS = 0.6x(stock 52W return - Nifty 500 52W
-                               return) + 0.4x(stock 52W return - sector 52W
-                               return), then converted to points by RS's
-                               percentile rank across this scan's full
-                               universe: top 10% -> 30, 80-90% -> 24,
-                               70-80% -> 18, 60-70% -> 12, below 60% -> 0
+  Relative Strength (30)    - 0 points unless the stock's trailing 52-week
+                               return beats BOTH the Nifty 500 and its
+                               sector outright (same binary test as Pillar
+                               3 above). If it does, RS = 0.6x(stock 52W
+                               return - Nifty 500 52W return) + 0.4x(stock
+                               52W return - sector 52W return) is converted
+                               to points by RS's percentile rank across this
+                               scan's full universe: top 10% -> 30,
+                               80-90% -> 24, 70-80% -> 18, 60-70% -> 12,
+                               below 60% -> 0
 
 The score is written for every stock that makes the SUPER_PERFORMER/
 PERFORMER cut (Momentum_Score column) - the web app computes and freezes
@@ -253,7 +257,11 @@ def compute_momentum_score(row: dict, pr: PillarResult, rs_percentile: float | N
     if roce is not None and roce_industry_median is not None and roce > roce_industry_median:
         fundamental_momentum += 7
 
-    relative_strength = _rs_percentile_points(rs_percentile)
+    # Relative Strength only pays out when the stock also clears the
+    # stricter, binary Pillar 3 bar (beats BOTH Nifty 500 and sector
+    # outright) - a high RS percentile alone isn't enough, since the 0.6/0.4
+    # blend can stay positive even when one side of that comparison fails.
+    relative_strength = _rs_percentile_points(rs_percentile) if pr.pillar3 == "PASS" else 0
 
     return MomentumScoreResult(
         price_momentum=price_momentum,

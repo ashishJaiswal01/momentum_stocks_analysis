@@ -124,7 +124,7 @@ universe on each run:
 |---|---|---|
 | **Price Momentum** | 40 | Within 2% of lifetime high (15) · Close > 50 DMA (8) · Close > 200 DMA (7) · RSI 55-70 (5) · Volume > 1.5× 20-day average (5) |
 | **Fundamental Momentum** | 30 | Latest TTM PAT at its own lifetime high (15) · Revenue growth > 15% YoY (8) · ROCE above its industry median (7) |
-| **Relative Strength** | 30 | `RS = 0.6×(stock 52W return − Nifty 500 52W return) + 0.4×(stock − sector)`, then converted to points by RS's percentile rank across this scan's full universe: top 10% → 30, 80-90% → 24, 70-80% → 18, 60-70% → 12, below 60% → 0 |
+| **Relative Strength** | 30 | **0 unless the stock's trailing 52-week return beats BOTH the Nifty 500 and its sector outright** (same binary test as Pillar 3). If it does, `RS = 0.6×(stock 52W return − Nifty 500 52W return) + 0.4×(stock − sector)` is converted to points by RS's percentile rank across this scan's full universe: top 10% → 30, 80-90% → 24, 70-80% → 18, 60-70% → 12, below 60% → 0 |
 
 The technical inputs (50/200-day SMA, 14-period RSI, 20-day volume ratio)
 come from the same already-fetched Yahoo Finance OHLCV history as the other
