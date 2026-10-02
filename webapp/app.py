@@ -791,13 +791,19 @@ def api_weekly_leaderboard():
     week_rows = _load_week_rows(data_dir, selected_weeks)
     week_ranked = _rank_weeks(week_rows, selected_weeks)
 
+    # Tickers that made the top 20 in *every* week shown - starred in each
+    # week's cell, and also listed on their own in the last column.
+    common_tickers = set.intersection(*(
+        {ticker for ticker, _ in week_ranked.get(date, [])} for date in selected_weeks
+    )) if selected_weeks else set()
+
     rows = []
     for rank in range(1, WEEKLY_LEADERBOARD_TOP_N + 1):
         by_week = []
         for i, date in enumerate(selected_weeks):
             ranked_this_week = week_ranked.get(date, [])
             if rank - 1 >= len(ranked_this_week):
-                by_week.append({"date": date, "ticker": "", "company_name": "", "score": "", "price": "", "gain_loss_pct": ""})
+                by_week.append({"date": date, "ticker": "", "company_name": "", "score": "", "price": "", "gain_loss_pct": "", "is_common": False})
                 continue
             ticker, info = ranked_this_week[rank - 1]
             price = info["price"]
@@ -812,10 +818,24 @@ def api_weekly_leaderboard():
             by_week.append({
                 "date": date, "ticker": ticker, "company_name": info["company_name"],
                 "score": info["score"], "price": price, "gain_loss_pct": gain_loss_pct,
+                "is_common": ticker in common_tickers,
             })
         rows.append({"rank": rank, "by_week": by_week})
 
-    return jsonify({"weeks": selected_weeks, "rows": rows, "available_weeks": all_weeks_desc})
+    # Ordered by the latest week's rank (every common ticker is, by
+    # definition, in the latest week's top 20 too).
+    latest_ranked = week_ranked.get(selected_weeks[-1], [])
+    common_stocks = [
+        {"ticker": ticker, "company_name": info["company_name"]}
+        for ticker, info in latest_ranked if ticker in common_tickers
+    ]
+    for rank, row in enumerate(rows, start=1):
+        row["common_stock"] = common_stocks[rank - 1] if rank - 1 < len(common_stocks) else None
+
+    return jsonify({
+        "weeks": selected_weeks, "rows": rows, "available_weeks": all_weeks_desc,
+        "common_stocks": common_stocks,
+    })
 
 
 @app.route("/api/weekly-leaderboard/export")

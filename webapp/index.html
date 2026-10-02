@@ -146,6 +146,7 @@
   .neg { color: var(--fail); }
   .pos { color: var(--pass); }
   .cross-super-marker { color: var(--qualifier); font-weight: 700; margin-left: 3px; }
+  .common-week-marker { color: var(--qualifier); font-weight: 700; margin-right: 3px; }
 
   #exited-banner {
     display: none;
@@ -430,8 +431,9 @@
       Top 20 stocks by Momentum Score (Strategy 1 only), for each of the last 5 weeks that have scan
       data - one block of 4 columns per week (Company, Score, Price, Gain/Loss %), oldest on the left.
       Each week is ranked independently by that week's own score, so rank 1 can be a different stock
-      week to week. Pick a week-ending date to look further back; weeks older than what's shown stay
-      available via the date picker.
+      week to week. A stock that made the top 20 in <strong>every</strong> week shown gets a ★ next to
+      its name, and the last column lists all such stocks together. Pick a week-ending date to look
+      further back; weeks older than what's shown stay available via the date picker.
     </div>
   </div>
   <div class="row">
@@ -449,6 +451,7 @@
   <div class="stats">
     <span>Weeks shown: <b id="weekly-stat-weeks">—</b></span>
     <span>Stocks: <b id="weekly-stat-count">0</b></span>
+    <span>Common to all weeks: <b id="weekly-stat-common">0</b></span>
   </div>
 
   <div class="table-wrap">
@@ -1213,6 +1216,9 @@ function renderWeeklyTable() {
       + `<th class="no-sort">${escapeHtml(date)} Price</th>`
       + `<th class="no-sort">${escapeHtml(date)} Gain/Loss %</th>`;
   }
+  if (weeks.length > 1) {
+    headHtml += `<th class="no-sort" title="Stocks that made the top 20 in every one of these ${weeks.length} weeks">Common to All ${weeks.length} Weeks</th>`;
+  }
   head.innerHTML = headHtml;
   head.querySelector('th[data-key="rank"]').addEventListener("click", () => {
     weeklySortDir *= -1;
@@ -1220,13 +1226,15 @@ function renderWeeklyTable() {
     renderWeeklyTable();
   });
 
+  const colCount = 1 + weeks.length * 4 + (weeks.length > 1 ? 1 : 0);
   if (rows.length === 0) {
-    body.innerHTML = `<tr><td colspan="${1 + weeks.length * 4}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="${colCount}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
   } else {
     body.innerHTML = rows.map(r => {
       let cells = `<td>${r.rank}</td>`;
       for (const wk of r.by_week) {
-        const nameCell = wk.company_name === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.company_name);
+        const star = wk.is_common ? `<span class="common-week-marker" title="Made the top 20 in every week shown">★</span>` : "";
+        const nameCell = wk.company_name === "" ? `<span style="color:var(--muted)">—</span>` : `${star}${escapeHtml(wk.company_name)}`;
         const scoreCell = wk.score === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.score);
         const priceCell = wk.price === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.price);
         let glCell;
@@ -1238,12 +1246,17 @@ function renderWeeklyTable() {
         }
         cells += `<td>${nameCell}</td><td>${scoreCell}</td><td>${priceCell}</td><td>${glCell}</td>`;
       }
+      if (weeks.length > 1) {
+        const commonCell = r.common_stock ? escapeHtml(r.common_stock.company_name) : `<span style="color:var(--muted)">—</span>`;
+        cells += `<td>${commonCell}</td>`;
+      }
       return `<tr>${cells}</tr>`;
     }).join("");
   }
 
   qs("weekly-stat-weeks").textContent = weeks.length ? `${weeks[0]} → ${weeks[weeks.length - 1]}` : "—";
   qs("weekly-stat-count").textContent = rows.length;
+  qs("weekly-stat-common").textContent = (currentWeeklyData.common_stocks || []).length;
 }
 
 async function loadWeeklyLeaderboard() {

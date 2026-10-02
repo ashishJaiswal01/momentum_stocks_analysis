@@ -321,10 +321,13 @@ Gain/Loss % is that specific stock's price change vs. its own price the
 previous week shown in the table (looked up by ticker, regardless of
 whether it ranked in that previous week's own top 20) - `N/A` for the first
 (oldest) week in view, since there's no prior week in that window to compare
-against, and for any stock missing a price either side. Use the **"Week
-ending on or before"** date picker to look further back; it shows the 5 most
-recent weeks at or before whatever date you pick, and "Latest" jumps back to
-the most current data.
+against, and for any stock missing a price either side. A stock that made
+the top 20 in **every** week currently shown gets a ★ next to its name in
+each week's cell, and an extra last column (only shown when more than one
+week is displayed) lists all such stocks together, one per row. Use the
+**"Week ending on or before"** date picker to look further back; it shows
+the 5 most recent weeks at or before whatever date you pick, and "Latest"
+jumps back to the most current data.
 
 **"Download All Weeks (CSV)"** exports every week scanned so far - not just
 the 5 shown on screen - as one flat CSV (`Week_Ending_Date, Rank,
