@@ -1184,14 +1184,59 @@ qs("reset-columns-btn-v2").addEventListener("click", () => {
 // (/api/weekly-leaderboard), its own table, no shared mutable state.
 // ============================================================================
 
-function renderWeeklyTable(data) {
+let currentWeeklyData = { weeks: [], rows: [] };
+let weeklySortKey = "rank";   // "rank" | "ticker" | "company_name" | "score:<date>" | "price:<date>"
+let weeklySortDir = 1;
+
+function weeklySortValue(row, key) {
+  if (key === "rank") return row.rank;
+  if (key === "ticker") return row.ticker;
+  if (key === "company_name") return row.company_name;
+  const [field, date] = key.split(":");
+  const wk = row.by_week.find(w => w.date === date);
+  return wk ? wk[field] : "";
+}
+
+function sortWeeklyRows() {
+  currentWeeklyData.rows.sort((a, b) => {
+    const av = weeklySortValue(a, weeklySortKey) ?? "";
+    const bv = weeklySortValue(b, weeklySortKey) ?? "";
+    const an = parseFloat(String(av).replace(/[%,]/g, ""));
+    const bn = parseFloat(String(bv).replace(/[%,]/g, ""));
+    let cmp;
+    if (!isNaN(an) && !isNaN(bn)) cmp = an - bn;
+    else cmp = String(av).localeCompare(String(bv));
+    return cmp * weeklySortDir;
+  });
+}
+
+function renderWeeklyTable() {
   const head = qs("weekly-table-head");
   const body = qs("weekly-table-body");
-  const weeks = data.weeks || [];
-  const rows = data.rows || [];
+  const weeks = currentWeeklyData.weeks || [];
+  const rows = currentWeeklyData.rows || [];
 
-  head.innerHTML = `<th>Rank</th><th>Ticker Symbol</th><th>Company Name</th>` +
-    weeks.map(date => `<th>${escapeHtml(date)} Score</th><th>${escapeHtml(date)} Price</th>`).join("");
+  const headCols = [
+    { key: "rank", label: "Rank" },
+    { key: "ticker", label: "Ticker Symbol" },
+    { key: "company_name", label: "Company Name" },
+  ];
+  for (const date of weeks) {
+    headCols.push({ key: `score:${date}`, label: `${date} Score` });
+    headCols.push({ key: `price:${date}`, label: `${date} Price` });
+  }
+  head.innerHTML = headCols.map(c => {
+    const arrow = c.key === weeklySortKey ? (weeklySortDir === 1 ? "▲" : "▼") : "";
+    return `<th data-key="${escapeAttr(c.key)}">${escapeHtml(c.label)} <span class="arrow">${arrow}</span></th>`;
+  }).join("");
+  head.querySelectorAll("th").forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      if (weeklySortKey === key) weeklySortDir *= -1; else { weeklySortKey = key; weeklySortDir = 1; }
+      sortWeeklyRows();
+      renderWeeklyTable();
+    });
+  });
 
   if (rows.length === 0) {
     body.innerHTML = `<tr><td colspan="${3 + weeks.length * 2}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
@@ -1225,7 +1270,15 @@ async function loadWeeklyLeaderboard() {
       status.textContent = "Failed to load: " + (data.error || "unknown error");
       return;
     }
-    renderWeeklyTable(data);
+    currentWeeklyData = data;
+    // A sort key from a previous load may reference a week that's no longer
+    // in this result set (e.g. switching to an older date range) - fall
+    // back to rank order rather than silently sorting by nothing.
+    const validKeys = new Set(["rank", "ticker", "company_name",
+      ...(data.weeks || []).flatMap(d => [`score:${d}`, `price:${d}`])]);
+    if (!validKeys.has(weeklySortKey)) { weeklySortKey = "rank"; weeklySortDir = 1; }
+    sortWeeklyRows();
+    renderWeeklyTable();
     if (!data.weeks || data.weeks.length === 0) {
       status.className = "err";
       status.textContent = endDate
