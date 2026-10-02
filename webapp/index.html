@@ -197,6 +197,7 @@
 <div class="tabs">
   <button class="tab-btn active" id="tab-btn-1">Momentum Strategy 1</button>
   <button class="tab-btn" id="tab-btn-2">Momentum Strategy 2</button>
+  <button class="tab-btn" id="tab-btn-3">Weekly Leaderboard</button>
 </div>
 
 <div id="tab1-content">
@@ -414,6 +415,41 @@
     <table id="data-table-v2">
       <thead><tr id="table-head-v2"></tr></thead>
       <tbody id="table-body-v2"></tbody>
+    </table>
+  </div>
+</main>
+</div>
+
+<div id="tab3-content" style="display:none">
+<header>
+  <div>
+    <h1>Weekly Momentum Leaderboard</h1>
+    <div class="sub" style="max-width: 900px;">
+      Top 20 stocks by Momentum Score (Strategy 1 only), with their score and price for each of the
+      last 5 weeks that have scan data - one column per week, oldest on the left. Ranked by the most
+      recent week's score. Pick a week-ending date to look further back; weeks older than what's shown
+      stay available via the date picker.
+    </div>
+  </div>
+  <div class="row">
+    <label for="weekly-end-date" style="color:var(--muted); font-size:13px;">Week ending on or before</label>
+    <input type="date" id="weekly-end-date" />
+    <button id="weekly-latest-btn" class="secondary">Latest</button>
+  </div>
+</header>
+
+<main>
+  <div id="weekly-status"></div>
+
+  <div class="stats">
+    <span>Weeks shown: <b id="weekly-stat-weeks">—</b></span>
+    <span>Stocks: <b id="weekly-stat-count">0</b></span>
+  </div>
+
+  <div class="table-wrap">
+    <table id="weekly-table">
+      <thead><tr id="weekly-table-head"></tr></thead>
+      <tbody id="weekly-table-body"></tbody>
     </table>
   </div>
 </main>
@@ -1141,18 +1177,86 @@ qs("reset-columns-btn-v2").addEventListener("click", () => {
   renderTableV2();
 });
 
-qs("tab-btn-1").addEventListener("click", () => {
-  qs("tab-btn-1").classList.add("active");
-  qs("tab-btn-2").classList.remove("active");
-  qs("tab1-content").style.display = "";
-  qs("tab2-content").style.display = "none";
+// ============================================================================
+// Weekly Leaderboard (Strategy 1 only) - top 20 stocks by Momentum Score
+// across the last 5 available weeks, one column per week for score and
+// price. Fully independent of the two tabs above: its own endpoint
+// (/api/weekly-leaderboard), its own table, no shared mutable state.
+// ============================================================================
+
+function renderWeeklyTable(data) {
+  const head = qs("weekly-table-head");
+  const body = qs("weekly-table-body");
+  const weeks = data.weeks || [];
+  const rows = data.rows || [];
+
+  head.innerHTML = `<th>Rank</th><th>Ticker Symbol</th><th>Company Name</th>` +
+    weeks.map(date => `<th>${escapeHtml(date)} Score</th><th>${escapeHtml(date)} Price</th>`).join("");
+
+  if (rows.length === 0) {
+    body.innerHTML = `<tr><td colspan="${3 + weeks.length * 2}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
+  } else {
+    body.innerHTML = rows.map(r => {
+      let cells = `<td>${r.rank}</td><td>${escapeHtml(r.ticker)}</td><td>${escapeHtml(r.company_name)}</td>`;
+      for (const wk of r.by_week) {
+        const scoreCell = wk.score === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.score);
+        const priceCell = wk.price === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.price);
+        cells += `<td>${scoreCell}</td><td>${priceCell}</td>`;
+      }
+      return `<tr>${cells}</tr>`;
+    }).join("");
+  }
+
+  qs("weekly-stat-weeks").textContent = weeks.length ? `${weeks[0]} → ${weeks[weeks.length - 1]}` : "—";
+  qs("weekly-stat-count").textContent = rows.length;
+}
+
+async function loadWeeklyLeaderboard() {
+  const status = qs("weekly-status");
+  status.className = "";
+  status.textContent = "Loading…";
+  const endDate = qs("weekly-end-date").value;
+  const url = "/api/weekly-leaderboard" + (endDate ? `?end_date=${encodeURIComponent(endDate)}` : "");
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok) {
+      status.className = "err";
+      status.textContent = "Failed to load: " + (data.error || "unknown error");
+      return;
+    }
+    renderWeeklyTable(data);
+    if (!data.weeks || data.weeks.length === 0) {
+      status.className = "err";
+      status.textContent = endDate
+        ? `No weeks with scan data on or before ${endDate}.`
+        : "No scan data available yet - run the pipeline and a 3-Pillar scan first.";
+    } else {
+      status.className = "ok";
+      status.textContent = `Showing ${data.weeks.length} week(s), ranked by the week of ${data.weeks[data.weeks.length - 1]}.`;
+    }
+  } catch (e) {
+    status.className = "err";
+    status.textContent = "Failed to load: " + e;
+  }
+}
+
+qs("weekly-latest-btn").addEventListener("click", () => {
+  qs("weekly-end-date").value = "";
+  loadWeeklyLeaderboard();
 });
-qs("tab-btn-2").addEventListener("click", () => {
-  qs("tab-btn-2").classList.add("active");
-  qs("tab-btn-1").classList.remove("active");
-  qs("tab2-content").style.display = "";
-  qs("tab1-content").style.display = "none";
-});
+qs("weekly-end-date").addEventListener("change", () => loadWeeklyLeaderboard());
+
+function showTab(n) {
+  for (const i of [1, 2, 3]) {
+    qs(`tab-btn-${i}`).classList.toggle("active", i === n);
+    qs(`tab${i}-content`).style.display = i === n ? "" : "none";
+  }
+  if (n === 3) loadWeeklyLeaderboard();
+}
+qs("tab-btn-1").addEventListener("click", () => showTab(1));
+qs("tab-btn-2").addEventListener("click", () => showTab(2));
+qs("tab-btn-3").addEventListener("click", () => showTab(3));
 
 const initV2Ready = (async function initV2() {
   if (window.location.protocol === "file:") {

@@ -304,6 +304,29 @@ endpoints and `data/scan_results_v2.db` - including its own date dropdown,
 "Run Strategy 2 Scan" button, and a description panel summarizing the
 strategy above.
 
+## 5. Weekly Leaderboard (Strategy 1 only)
+
+A third tab, **Weekly Leaderboard**, shows the top 20 Strategy 1 stocks by
+Momentum Score with one column pair (Score, Price) per week, for the last 5
+weeks that have scan data - ranked by the most recent week's score. Use the
+**"Week ending on or before"** date picker to look further back; it shows
+the 5 most recent weeks at or before whatever date you pick, and "Latest"
+jumps back to the most current data.
+
+This reads directly from each week's `3pillar_scan.csv` on disk (one file
+per market date, auto-run on demand via the same scan engine as the "Run
+3-Pillar Scan" button if a date has enrichment but hasn't been scanned yet)
+rather than the database - Strategy 1's own DB only keeps one row per ticker
+(its current state, since the one-row-per-ticker upsert change in section 3),
+so historical weekly snapshots have to come from the per-date scan CSVs,
+which are never overwritten once written. A "week" is an ISO calendar week
+(Monday-Sunday); if a week has more than one scan date, the most recent one
+in that week is used as its representative snapshot. Weeks with no scan data
+at all (no `enrich_momentum_metrics.py` run for any date in that week) are
+skipped rather than shown blank - so "last 5 weeks" means the last 5 weeks
+*with data*, not necessarily the last 5 calendar weeks. Backed by
+`GET /api/weekly-leaderboard` (optional `?end_date=YYYY-MM-DD`).
+
 ## Known limitations
 
 - **Sector-index 52-week return** is blank for ~30% of stocks — Yahoo Finance

@@ -685,6 +685,113 @@ def api_clear():
 
 
 # ============================================================================
+# Weekly Leaderboard (Strategy 1 only) - top 20 stocks by Momentum Score
+# across the last 5 available weeks, with each week's score and price in its
+# own column. Reads directly from each week's 3pillar_scan.csv on disk
+# (auto-running the scan for a date that has enrichment but hasn't been
+# scanned yet, same as the "Run 3-Pillar Scan" button) rather than the DB -
+# Strategy 1's DB only keeps one row per ticker (current state, since the
+# one-row-per-ticker upsert change), so historical weekly snapshots have to
+# come from the per-date scan CSVs, which are never overwritten once written.
+# ============================================================================
+
+WEEKLY_LEADERBOARD_TOP_N = 20
+WEEKLY_LEADERBOARD_WEEK_COUNT = 5
+
+
+def _enriched_dates_v1() -> list[str]:
+    """All dates with Strategy 1 enrichment output on disk, descending."""
+    bhavcopy_dir = PROJECT_DIR / "data" / "bhavcopy"
+    if not bhavcopy_dir.exists():
+        return []
+    return sorted(
+        (p.name for p in bhavcopy_dir.iterdir()
+         if p.is_dir() and (p / "enriched" / "momentum_metrics.csv").exists()),
+        reverse=True,
+    )
+
+
+def _iso_week_key(date_str: str) -> tuple[int, int]:
+    iso = datetime.strptime(date_str, "%Y-%m-%d").isocalendar()
+    return (iso[0], iso[1])  # (ISO year, ISO week number)
+
+
+def _weekly_representative_dates(dates_desc: list[str]) -> list[str]:
+    """One date per ISO week - the most recent enriched date in that week.
+    Input must already be sorted descending; output stays descending,
+    newest week first."""
+    seen_weeks = set()
+    representatives = []
+    for d in dates_desc:
+        wk = _iso_week_key(d)
+        if wk not in seen_weeks:
+            seen_weeks.add(wk)
+            representatives.append(d)
+    return representatives
+
+
+@app.route("/api/weekly-leaderboard")
+def api_weekly_leaderboard():
+    end_date = (request.args.get("end_date") or "").strip() or None
+
+    all_dates = _enriched_dates_v1()
+    all_weeks_desc = _weekly_representative_dates(all_dates)
+
+    week_dates_desc = all_weeks_desc
+    if end_date:
+        week_dates_desc = [d for d in all_weeks_desc if d <= end_date]
+
+    selected_weeks = list(reversed(week_dates_desc[:WEEKLY_LEADERBOARD_WEEK_COUNT]))  # oldest -> newest
+
+    data_dir = PROJECT_DIR / "data"
+    week_rows: dict[str, dict[str, dict]] = {}  # date -> {ticker: {company_name, price, score}}
+    for date in selected_weeks:
+        scan_csv = data_dir / "bhavcopy" / date / "enriched" / "3pillar_scan.csv"
+        if not scan_csv.exists():
+            try:
+                run_3pillar_scan.run_scan(data_dir, date, skip_ai_commentary=True)
+            except run_3pillar_scan.ScanInputError:
+                week_rows[date] = {}
+                continue
+        with open(scan_csv, newline="", encoding="utf-8-sig") as f:
+            week_rows[date] = {
+                row["Ticker_Symbol"]: {
+                    "company_name": row.get("Company_Name") or "",
+                    "price": row.get("Closing_Price_INR") or "",
+                    "score": row.get("Momentum_Score") or "",
+                }
+                for row in csv.DictReader(f)
+            }
+
+    if not selected_weeks:
+        return jsonify({"weeks": [], "rows": [], "available_weeks": all_weeks_desc})
+
+    latest_week = selected_weeks[-1]
+
+    def _score_sort_key(item: tuple[str, dict]) -> float:
+        try:
+            return float(item[1]["score"])
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    ranked = sorted(week_rows.get(latest_week, {}).items(), key=_score_sort_key, reverse=True)
+    top_tickers = [t for t, _ in ranked[:WEEKLY_LEADERBOARD_TOP_N]]
+
+    rows = []
+    for rank, ticker in enumerate(top_tickers, start=1):
+        company_name = ""
+        by_week = []
+        for date in selected_weeks:
+            info = week_rows.get(date, {}).get(ticker)
+            if info and not company_name:
+                company_name = info["company_name"]
+            by_week.append({"date": date, "score": info["score"] if info else "", "price": info["price"] if info else ""})
+        rows.append({"rank": rank, "ticker": ticker, "company_name": company_name, "by_week": by_week})
+
+    return jsonify({"weeks": selected_weeks, "rows": rows, "available_weeks": all_weeks_desc})
+
+
+# ============================================================================
 # Momentum Strategy-2 (Institutional Momentum Screening & Execution).
 # Fully independent of everything above: its own SQLite file
 # (data/scan_results_v2.db), its own table, its own routes. It reuses the
