@@ -1224,6 +1224,7 @@ function renderWeeklyTable() {
   for (const date of weeks) {
     headCols.push({ key: `score:${date}`, label: `${date} Score` });
     headCols.push({ key: `price:${date}`, label: `${date} Price` });
+    headCols.push({ key: `gain_loss_pct:${date}`, label: `${date} Gain/Loss %` });
   }
   head.innerHTML = headCols.map(c => {
     const arrow = c.key === weeklySortKey ? (weeklySortDir === 1 ? "▲" : "▼") : "";
@@ -1239,14 +1240,21 @@ function renderWeeklyTable() {
   });
 
   if (rows.length === 0) {
-    body.innerHTML = `<tr><td colspan="${3 + weeks.length * 2}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="${3 + weeks.length * 3}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
   } else {
     body.innerHTML = rows.map(r => {
       let cells = `<td>${r.rank}</td><td>${escapeHtml(r.ticker)}</td><td>${escapeHtml(r.company_name)}</td>`;
       for (const wk of r.by_week) {
         const scoreCell = wk.score === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.score);
         const priceCell = wk.price === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.price);
-        cells += `<td>${scoreCell}</td><td>${priceCell}</td>`;
+        let glCell;
+        if (!wk.gain_loss_pct || wk.gain_loss_pct === "N/A") {
+          glCell = `<span style="color:var(--muted)">${escapeHtml(wk.gain_loss_pct || "—")}</span>`;
+        } else {
+          const n = parseFloat(wk.gain_loss_pct);
+          glCell = `<span class="${n < 0 ? 'neg' : (n > 0 ? 'pos' : '')}">${escapeHtml(wk.gain_loss_pct)}</span>`;
+        }
+        cells += `<td>${scoreCell}</td><td>${priceCell}</td><td>${glCell}</td>`;
       }
       return `<tr>${cells}</tr>`;
     }).join("");

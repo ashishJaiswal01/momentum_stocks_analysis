@@ -781,11 +781,18 @@ def api_weekly_leaderboard():
     for rank, ticker in enumerate(top_tickers, start=1):
         company_name = ""
         by_week = []
+        prev_price = None
         for date in selected_weeks:
             info = week_rows.get(date, {}).get(ticker)
             if info and not company_name:
                 company_name = info["company_name"]
-            by_week.append({"date": date, "score": info["score"] if info else "", "price": info["price"] if info else ""})
+            price = info["price"] if info else ""
+            # Gain/loss vs. the previous week shown - "N/A" for the first
+            # week in view (no prior week in this window to compare against)
+            # or any week where the ticker's price is missing either side.
+            gain_loss_pct = format_gain_loss(price, prev_price) if prev_price is not None else "N/A"
+            by_week.append({"date": date, "score": info["score"] if info else "", "price": price, "gain_loss_pct": gain_loss_pct})
+            prev_price = price
         rows.append({"rank": rank, "ticker": ticker, "company_name": company_name, "by_week": by_week})
 
     return jsonify({"weeks": selected_weeks, "rows": rows, "available_weeks": all_weeks_desc})

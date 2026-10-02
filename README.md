@@ -307,11 +307,16 @@ strategy above.
 ## 5. Weekly Leaderboard (Strategy 1 only)
 
 A third tab, **Weekly Leaderboard**, shows the top 20 Strategy 1 stocks by
-Momentum Score with one column pair (Score, Price) per week, for the last 5
-weeks that have scan data - ranked by the most recent week's score. Use the
-**"Week ending on or before"** date picker to look further back; it shows
-the 5 most recent weeks at or before whatever date you pick, and "Latest"
-jumps back to the most current data.
+Momentum Score with one column triple (Score, Price, Gain/Loss %) per week,
+for the last 5 weeks that have scan data - ranked by the most recent week's
+score. Gain/Loss % is that week's price change vs. the previous week *shown
+in the table* (not necessarily the immediately preceding calendar week) -
+`N/A` for the first (oldest) week in view, since there's no prior week in
+that window to compare against, and for any week the ticker is missing a
+price for. Every column, including each week's Score/Price/Gain-Loss, is
+sortable by clicking its header. Use the **"Week ending on or before"** date
+picker to look further back; it shows the 5 most recent weeks at or before
+whatever date you pick, and "Latest" jumps back to the most current data.
 
 This reads directly from each week's `3pillar_scan.csv` on disk (one file
 per market date, auto-run on demand via the same scan engine as the "Run
