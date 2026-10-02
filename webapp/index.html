@@ -106,6 +106,8 @@
     top: 0;
   }
   thead th:hover { color: var(--text); }
+  thead th.no-sort { cursor: default; }
+  thead th.no-sort:hover { color: var(--muted); }
   thead th .arrow { margin-left: 4px; opacity: 0.5; }
   thead th.dragging { opacity: 0.4; }
   thead th.drag-over { box-shadow: inset 2px 0 0 var(--accent); }
@@ -425,10 +427,11 @@
   <div>
     <h1>Weekly Momentum Leaderboard</h1>
     <div class="sub" style="max-width: 900px;">
-      Top 20 stocks by Momentum Score (Strategy 1 only), with their score and price for each of the
-      last 5 weeks that have scan data - one column per week, oldest on the left. Ranked by the most
-      recent week's score. Pick a week-ending date to look further back; weeks older than what's shown
-      stay available via the date picker.
+      Top 20 stocks by Momentum Score (Strategy 1 only), for each of the last 5 weeks that have scan
+      data - one block of 4 columns per week (Company, Score, Price, Gain/Loss %), oldest on the left.
+      Each week is ranked independently by that week's own score, so rank 1 can be a different stock
+      week to week. Pick a week-ending date to look further back; weeks older than what's shown stay
+      available via the date picker.
     </div>
   </div>
   <div class="row">
@@ -1185,29 +1188,13 @@ qs("reset-columns-btn-v2").addEventListener("click", () => {
 // ============================================================================
 
 let currentWeeklyData = { weeks: [], rows: [] };
-let weeklySortKey = "rank";   // "rank" | "ticker" | "company_name" | "score:<date>" | "price:<date>"
-let weeklySortDir = 1;
-
-function weeklySortValue(row, key) {
-  if (key === "rank") return row.rank;
-  if (key === "ticker") return row.ticker;
-  if (key === "company_name") return row.company_name;
-  const [field, date] = key.split(":");
-  const wk = row.by_week.find(w => w.date === date);
-  return wk ? wk[field] : "";
-}
+let weeklySortDir = 1;   // Rank is the only sortable column now (see renderWeeklyTable) - each
+                         // week has its own independent top 20, so a row no longer represents
+                         // one consistent stock across weeks and per-week-column sort has no
+                         // single well-defined row order to produce.
 
 function sortWeeklyRows() {
-  currentWeeklyData.rows.sort((a, b) => {
-    const av = weeklySortValue(a, weeklySortKey) ?? "";
-    const bv = weeklySortValue(b, weeklySortKey) ?? "";
-    const an = parseFloat(String(av).replace(/[%,]/g, ""));
-    const bn = parseFloat(String(bv).replace(/[%,]/g, ""));
-    let cmp;
-    if (!isNaN(an) && !isNaN(bn)) cmp = an - bn;
-    else cmp = String(av).localeCompare(String(bv));
-    return cmp * weeklySortDir;
-  });
+  currentWeeklyData.rows.sort((a, b) => (a.rank - b.rank) * weeklySortDir);
 }
 
 function renderWeeklyTable() {
@@ -1216,35 +1203,28 @@ function renderWeeklyTable() {
   const weeks = currentWeeklyData.weeks || [];
   const rows = currentWeeklyData.rows || [];
 
-  const headCols = [
-    { key: "rank", label: "Rank" },
-    { key: "ticker", label: "Ticker Symbol" },
-    { key: "company_name", label: "Company Name" },
-  ];
+  const rankArrow = weeklySortDir === 1 ? "▲" : "▼";
+  let headHtml = `<th data-key="rank">Rank <span class="arrow">${rankArrow}</span></th>`;
   for (const date of weeks) {
-    headCols.push({ key: `score:${date}`, label: `${date} Score` });
-    headCols.push({ key: `price:${date}`, label: `${date} Price` });
-    headCols.push({ key: `gain_loss_pct:${date}`, label: `${date} Gain/Loss %` });
+    headHtml += `<th class="no-sort">${escapeHtml(date)} Company</th>`
+      + `<th class="no-sort">${escapeHtml(date)} Score</th>`
+      + `<th class="no-sort">${escapeHtml(date)} Price</th>`
+      + `<th class="no-sort">${escapeHtml(date)} Gain/Loss %</th>`;
   }
-  head.innerHTML = headCols.map(c => {
-    const arrow = c.key === weeklySortKey ? (weeklySortDir === 1 ? "▲" : "▼") : "";
-    return `<th data-key="${escapeAttr(c.key)}">${escapeHtml(c.label)} <span class="arrow">${arrow}</span></th>`;
-  }).join("");
-  head.querySelectorAll("th").forEach(th => {
-    th.addEventListener("click", () => {
-      const key = th.dataset.key;
-      if (weeklySortKey === key) weeklySortDir *= -1; else { weeklySortKey = key; weeklySortDir = 1; }
-      sortWeeklyRows();
-      renderWeeklyTable();
-    });
+  head.innerHTML = headHtml;
+  head.querySelector('th[data-key="rank"]').addEventListener("click", () => {
+    weeklySortDir *= -1;
+    sortWeeklyRows();
+    renderWeeklyTable();
   });
 
   if (rows.length === 0) {
-    body.innerHTML = `<tr><td colspan="${3 + weeks.length * 3}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="${1 + weeks.length * 4}"><div class="empty">No scan data available for this period. Pick a different week-ending date, or run enrichment + a scan for more historical dates.</div></td></tr>`;
   } else {
     body.innerHTML = rows.map(r => {
-      let cells = `<td>${r.rank}</td><td>${escapeHtml(r.ticker)}</td><td>${escapeHtml(r.company_name)}</td>`;
+      let cells = `<td>${r.rank}</td>`;
       for (const wk of r.by_week) {
+        const nameCell = wk.company_name === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.company_name);
         const scoreCell = wk.score === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.score);
         const priceCell = wk.price === "" ? `<span style="color:var(--muted)">—</span>` : escapeHtml(wk.price);
         let glCell;
@@ -1254,7 +1234,7 @@ function renderWeeklyTable() {
           const n = parseFloat(wk.gain_loss_pct);
           glCell = `<span class="${n < 0 ? 'neg' : (n > 0 ? 'pos' : '')}">${escapeHtml(wk.gain_loss_pct)}</span>`;
         }
-        cells += `<td>${scoreCell}</td><td>${priceCell}</td><td>${glCell}</td>`;
+        cells += `<td>${nameCell}</td><td>${scoreCell}</td><td>${priceCell}</td><td>${glCell}</td>`;
       }
       return `<tr>${cells}</tr>`;
     }).join("");
@@ -1279,12 +1259,6 @@ async function loadWeeklyLeaderboard() {
       return;
     }
     currentWeeklyData = data;
-    // A sort key from a previous load may reference a week that's no longer
-    // in this result set (e.g. switching to an older date range) - fall
-    // back to rank order rather than silently sorting by nothing.
-    const validKeys = new Set(["rank", "ticker", "company_name",
-      ...(data.weeks || []).flatMap(d => [`score:${d}`, `price:${d}`])]);
-    if (!validKeys.has(weeklySortKey)) { weeklySortKey = "rank"; weeklySortDir = 1; }
     sortWeeklyRows();
     renderWeeklyTable();
     if (!data.weeks || data.weeks.length === 0) {
@@ -1294,7 +1268,7 @@ async function loadWeeklyLeaderboard() {
         : "No scan data available yet - run the pipeline and a 3-Pillar scan first.";
     } else {
       status.className = "ok";
-      status.textContent = `Showing ${data.weeks.length} week(s), ranked by the week of ${data.weeks[data.weeks.length - 1]}.`;
+      status.textContent = `Showing ${data.weeks.length} week(s) - each week's top 20 ranked independently by that week's own score.`;
     }
   } catch (e) {
     status.className = "err";

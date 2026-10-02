@@ -766,34 +766,42 @@ def api_weekly_leaderboard():
     if not selected_weeks:
         return jsonify({"weeks": [], "rows": [], "available_weeks": all_weeks_desc})
 
-    latest_week = selected_weeks[-1]
-
     def _score_sort_key(item: tuple[str, dict]) -> float:
         try:
             return float(item[1]["score"])
         except (TypeError, ValueError):
             return float("-inf")
 
-    ranked = sorted(week_rows.get(latest_week, {}).items(), key=_score_sort_key, reverse=True)
-    top_tickers = [t for t, _ in ranked[:WEEKLY_LEADERBOARD_TOP_N]]
+    # Each week gets its own top-20 by that week's own score - the stock at
+    # rank N can be a different ticker in different weeks.
+    week_ranked: dict[str, list[tuple[str, dict]]] = {
+        date: sorted(week_rows.get(date, {}).items(), key=_score_sort_key, reverse=True)[:WEEKLY_LEADERBOARD_TOP_N]
+        for date in selected_weeks
+    }
 
     rows = []
-    for rank, ticker in enumerate(top_tickers, start=1):
-        company_name = ""
+    for rank in range(1, WEEKLY_LEADERBOARD_TOP_N + 1):
         by_week = []
-        prev_price = None
-        for date in selected_weeks:
-            info = week_rows.get(date, {}).get(ticker)
-            if info and not company_name:
-                company_name = info["company_name"]
-            price = info["price"] if info else ""
-            # Gain/loss vs. the previous week shown - "N/A" for the first
-            # week in view (no prior week in this window to compare against)
-            # or any week where the ticker's price is missing either side.
-            gain_loss_pct = format_gain_loss(price, prev_price) if prev_price is not None else "N/A"
-            by_week.append({"date": date, "score": info["score"] if info else "", "price": price, "gain_loss_pct": gain_loss_pct})
-            prev_price = price
-        rows.append({"rank": rank, "ticker": ticker, "company_name": company_name, "by_week": by_week})
+        for i, date in enumerate(selected_weeks):
+            ranked_this_week = week_ranked.get(date, [])
+            if rank - 1 >= len(ranked_this_week):
+                by_week.append({"date": date, "ticker": "", "company_name": "", "score": "", "price": "", "gain_loss_pct": ""})
+                continue
+            ticker, info = ranked_this_week[rank - 1]
+            price = info["price"]
+            # Gain/loss vs. this same ticker's price the previous week shown
+            # (regardless of whether it ranked in that week's own top 20) -
+            # "N/A" for the first week in view, with no prior week to compare.
+            if i == 0:
+                gain_loss_pct = "N/A"
+            else:
+                prev_info = week_rows.get(selected_weeks[i - 1], {}).get(ticker)
+                gain_loss_pct = format_gain_loss(price, prev_info["price"] if prev_info else "")
+            by_week.append({
+                "date": date, "ticker": ticker, "company_name": info["company_name"],
+                "score": info["score"], "price": price, "gain_loss_pct": gain_loss_pct,
+            })
+        rows.append({"rank": rank, "by_week": by_week})
 
     return jsonify({"weeks": selected_weeks, "rows": rows, "available_weeks": all_weeks_desc})
 
